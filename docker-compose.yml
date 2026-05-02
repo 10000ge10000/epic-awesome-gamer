@@ -53,6 +53,10 @@ services:
     environment:
       - REDIS_HOST=redis
       - TZ=Asia/Shanghai
+      # 历史数据偏移量配置（用于补偿丢失的记录，其他用户无需修改）
+      - CLAIM_HISTORY_OFFSET=1132
+      - ACCOUNT_VERIFIED_OFFSET=140
+      - ACCOUNT_TOTAL_OFFSET=140
     depends_on:
       redis:
         condition: service_healthy
@@ -124,6 +128,8 @@ services:
       # WARP 代理配置（用于检测和重启）
       - WARP_PROXY_HOST=epic-warp
       - WARP_PROXY_PORT=19000
+      # 内部服务不走代理（修复入库 API 失败问题）
+      - NO_PROXY=web,epic-web,redis,epic-redis,localhost,127.0.0.1
       # ============================================================
       # ⚠️⚠️⚠️ 必须配置 API Key ⚠️⚠️⚠️
       # ============================================================

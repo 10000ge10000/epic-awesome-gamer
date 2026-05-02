@@ -24,6 +24,13 @@ app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 DATA_DIR = "/app/data"
 DB_PATH = os.path.join(DATA_DIR, "kiosk.db")
+
+# 历史数据偏移量配置（通过环境变量设置，默认为 0）
+# 用于补偿因入库 API 失效丢失的历史记录
+# 其他用户部署时默认为 0，不影响其数据显示
+CLAIM_HISTORY_OFFSET = int(os.getenv("CLAIM_HISTORY_OFFSET", "0"))
+ACCOUNT_VERIFIED_OFFSET = int(os.getenv("ACCOUNT_VERIFIED_OFFSET", "0"))
+ACCOUNT_TOTAL_OFFSET = int(os.getenv("ACCOUNT_TOTAL_OFFSET", "0"))
 USER_DATA_DIR = os.path.join(DATA_DIR, "user_data")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(USER_DATA_DIR, exist_ok=True)
@@ -302,19 +309,19 @@ async def get_system_stats():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # 托管账号总数
+    # 托管账号总数（数据库记录 + 偏移量）
     c.execute("SELECT COUNT(*) FROM accounts")
-    total_accounts = c.fetchone()[0]
+    total_accounts = c.fetchone()[0] + ACCOUNT_TOTAL_OFFSET
 
-    # 已验证账号数（在 accounts 表中且有成功领取记录）
+    # 已验证账号数（数据库记录 + 偏移量）
     c.execute("""
         SELECT COUNT(DISTINCT l.email)
         FROM logs l
         INNER JOIN accounts a ON l.email = a.email
     """)
-    verified_accounts = c.fetchone()[0]
+    verified_accounts = c.fetchone()[0] + ACCOUNT_VERIFIED_OFFSET
 
-    # 待验证账号数（在 accounts 表中但无领取记录）
+    # 待验证账号数（数据库记录 + 偏移量）
     pending_accounts = total_accounts - verified_accounts
 
     # 今日领取数量
@@ -322,9 +329,9 @@ async def get_system_stats():
     c.execute("SELECT COUNT(*) FROM logs WHERE claim_time LIKE ?", (f"{today}%",))
     today_claims = c.fetchone()[0]
 
-    # 累计领取数量
+    # 累计领取数量（数据库记录 + 历史偏移量补偿）
     c.execute("SELECT COUNT(*) FROM logs")
-    total_claims = c.fetchone()[0]
+    total_claims = c.fetchone()[0] + CLAIM_HISTORY_OFFSET
 
     conn.close()
 

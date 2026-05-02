@@ -200,8 +200,13 @@ def report_success(email, game_title):
     向 Web 后端上报游戏领取成功记录
 
     包含重试机制（最多3次），避免因网络波动导致记录丢失
+
+    ⚠️ 重要：内部 API 调用必须禁用代理，否则会被 WARP 拦截导致 503 错误
     """
     filename = scrape_and_download_image(game_title)
+
+    # 显式禁用代理，确保内部服务请求不被 WARP 拦截
+    no_proxy = {"http": None, "https": None}
 
     for attempt in range(3):
         try:
@@ -209,7 +214,7 @@ def report_success(email, game_title):
                 "email": email,
                 "game_title": game_title,
                 "image_filename": filename or "default.png"
-            }, timeout=5)
+            }, timeout=5, proxies=no_proxy)
 
             result = resp.json()
             status = result.get("status", "unknown")
@@ -253,17 +258,22 @@ def clean_user_profile(email):
 def nuke_account_immediately(email):
     """
     ☢️ 核弹模式：等待进程死亡后，执行双重删除
+
+    ⚠️ 重要：内部 API 调用必须禁用代理，否则会被 WARP 拦截导致 503 错误
     """
     print(f"💀 [致命错误] 正在执行销毁程序: {email}")
-    
+
     # ⚠️ 关键步骤：先睡 5 秒，让浏览器进程死透，防止它诈尸写回文件
     print("⏳ 等待浏览器进程完全退出 (5s)...")
     time.sleep(5)
-    
+
+    # 显式禁用代理，确保内部服务请求不被 WARP 拦截
+    no_proxy = {"http": None, "https": None}
+
     # 1. 呼叫后端删除 (后端权限通常更高)
     try:
         print(f"📞 呼叫后端 API: {NUKE_API_URL}")
-        res = requests.post(NUKE_API_URL, json={"email": email}, timeout=5)
+        res = requests.post(NUKE_API_URL, json={"email": email}, timeout=5, proxies=no_proxy)
         print(f"📞 后端响应: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"❌ 后端 API 连接失败: {e}")
