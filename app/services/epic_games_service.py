@@ -8,7 +8,7 @@ import json
 from contextlib import suppress
 from enum import Enum
 from json import JSONDecodeError
-from typing import List
+from typing import Any, List
 
 import httpx
 from hcaptcha_challenger.agent import AgentV
@@ -365,93 +365,147 @@ class EpicGames:
 
     @staticmethod
     async def _active_purchase_container(page: Page):
-        logger.debug("Scanning for purchase iframe...")
+        logger.debug("Scanning for purchase container...")
 
-        # 尝试多种 iframe 选择器
-        iframe_selectors = [
-            "//iframe[contains(@id, 'webPurchaseContainer')]",
-            "//iframe[contains(@src, 'purchase')]",
-            "//iframe[contains(@name, 'purchase')]",
-            "iframe[id*='webPurchase']",
-            "iframe[src*='purchase']",
+        # Epic 的新结账页不稳定：确认按钮可能在 webPurchase iframe、
+        # 其它 purchase iframe、甚至主页面弹层里。这里不再只选第一个 iframe，
+        # 而是扫描主页面和所有 frame，避免命中无关 iframe 后误报。
+        await page.wait_for_timeout(3000)
+
+        button_texts = [
+            "PLACE ORDER",
+            "Place Order",
+            "GET",
+            "Get",
+            "ADD TO LIBRARY",
+            "Add to library",
+            "Add To Library",
+            "BUY NOW",
+            "Buy Now",
+            "CONFIRM",
+            "Confirm",
+            "Confirm Order",
+            "Complete Order",
+            "Submit Order",
         ]
-
-        wpc = None
-        for selector in iframe_selectors:
-            try:
-                frame = page.frame_locator(selector).first
-                # 尝试检查 frame 是否有内容
-                await frame.locator("body").wait_for(timeout=3000)
-                wpc = frame
-                logger.debug(f"✅ Found iframe via: {selector}")
-                break
-            except Exception as e:
-                logger.debug(f"Iframe selector '{selector}' failed: {e}")
-                continue
-
-        if wpc is None:
-            # 最后尝试：直接等待任何 iframe 出现
-            logger.warning("No iframe found with primary selectors, trying fallback...")
-            try:
-                await page.wait_for_selector("iframe", timeout=10000)
-                wpc = page.frame_locator("iframe").first
-            except Exception as e:
-                logger.error(f"No iframe found on page: {e}")
-                raise AssertionError("Could not find purchase iframe on page")
-
-        logger.debug("Looking for payment button in iframe...")
-
-        # 尝试多种按钮选择器
-        button_selectors = [
-            ("button", "PLACE ORDER"),
-            ("button", "Place Order"),
-            ("button", "GET"),
-            ("button", "Buy Now"),
-            "//button[contains(@class, 'payment-confirm__btn')]",
-            "//button[contains(@class, 'btn-primary')]",
-            "//button[@type='submit']",
-            "button.payment-btn",
+        css_selectors = [
             "button[data-testid='purchase-button']",
+            "button[data-testid='place-order-button']",
+            "button[data-testid='confirm-order-button']",
+            "button[data-testid*='purchase']",
+            "button[data-testid*='order']",
+            "button[data-testid*='confirm']",
+            "button.payment-btn",
+            "button[class*='payment-confirm']",
+            "button[class*='confirm']",
+            "button[type='submit']",
         ]
 
-        for selector in button_selectors:
+        containers: list[tuple[str, Any]] = [("page", page)]
+        for idx, frame in enumerate(page.frames):
+            if frame == page.main_frame:
+                continue
+            containers.append((f"frame[{idx}] {frame.url[:180]}", frame))
+
+        logger.info(f"🔎 扫描结账容器: {len(containers)} 个候选")
+
+        async def _button_is_usable(btn) -> bool:
             try:
-                if isinstance(selector, tuple):
-                    # (selector_type, text) 格式
-                    btn = wpc.locator(selector[0], has_text=selector[1])
-                else:
-                    btn = wpc.locator(selector)
+                await btn.wait_for(state="visible", timeout=2500)
+                if await btn.is_disabled(timeout=1000):
+                    return False
+                return True
+            except Exception:
+                return False
 
-                await expect(btn).to_be_visible(timeout=5000)
-                btn_text = await btn.text_content()
-                logger.debug(f"✅ Found button: '{btn_text}' via selector: {selector}")
-                return wpc, btn
-            except AssertionError:
-                continue
+        async def _describe_buttons(label: str, container: Any):
+            try:
+                buttons = await container.locator("button").all()
+                logger.warning(f"🔍 {label} 按钮数量: {len(buttons)}")
+                for i, btn in enumerate(buttons[:12]):
+                    try:
+                        text = (await btn.text_content(timeout=1000) or "").strip()
+                        aria = await btn.get_attribute("aria-label", timeout=1000)
+                        testid = await btn.get_attribute("data-testid", timeout=1000)
+                        disabled = await btn.is_disabled(timeout=1000)
+                        logger.warning(
+                            f"🔍 {label} button[{i}]: text={text!r}, aria={aria!r}, "
+                            f"testid={testid!r}, disabled={disabled}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"🔍 {label} button[{i}] inspect failed: {e}")
             except Exception as e:
-                logger.debug(f"Button selector {selector} failed: {e}")
-                continue
+                logger.warning(f"🔍 {label} list buttons failed: {e}")
 
-        # 调试：打印 iframe 中所有按钮
-        logger.warning("Primary buttons not found. Debugging iframe content...")
-        try:
-            all_buttons = wpc.locator("button").all()
-            count = len(all_buttons)
-            logger.debug(f"Found {count} buttons in iframe")
-            for i, btn in enumerate(all_buttons[:5]):  # 只显示前5个
+        for label, container in containers:
+            logger.info(f"🔎 检查结账容器: {label}")
+
+            for text_value in button_texts:
                 try:
-                    text = await btn.text_content(timeout=1000)
-                    cls = await btn.get_attribute("class", timeout=1000)
-                    logger.debug(f"  Button {i}: text='{text}', class='{cls}'")
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"Failed to list buttons: {e}")
+                    btn = container.locator("button", has_text=text_value).first
+                    if await _button_is_usable(btn):
+                        btn_text = (await btn.text_content(timeout=1000) or "").strip()
+                        logger.info(f"✅ 找到结账按钮: {btn_text!r} | 容器: {label} | 文本: {text_value}")
+                        return container, btn
+                except Exception as e:
+                    logger.debug(f"Button text {text_value!r} failed in {label}: {e}")
 
-        raise AssertionError("Could not find Place Order button in iframe")
+            for selector in css_selectors:
+                try:
+                    btn = container.locator(selector).first
+                    if await _button_is_usable(btn):
+                        btn_text = (await btn.text_content(timeout=1000) or "").strip()
+                        logger.info(f"✅ 找到结账按钮: {btn_text!r} | 容器: {label} | 选择器: {selector}")
+                        return container, btn
+                except Exception as e:
+                    logger.debug(f"Button selector {selector!r} failed in {label}: {e}")
+
+        logger.warning("Primary buttons not found. Debugging checkout containers...")
+        for label, container in containers:
+            await _describe_buttons(label, container)
+
+        with suppress(Exception):
+            debug_path = RUNTIME_DIR.joinpath("checkout_debug_last.html")
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            debug_path.write_text(await page.content(), encoding="utf-8")
+            logger.warning(f"🧾 已保存结账页调试 HTML: {debug_path}")
+
+        raise AssertionError("Could not find Place Order button in checkout containers")
 
     @staticmethod
-    async def _uk_confirm_order(wpc: FrameLocator):
+    async def _handle_device_not_supported_modal(page: Page) -> bool:
+        """Continue past Epic's intermediate unsupported-device modal."""
+        dialog = page.locator("[role='dialog']").filter(has_text="Device not supported").first
+
+        try:
+            await dialog.wait_for(state="visible", timeout=3000)
+        except Exception:
+            return False
+
+        body_text = ""
+        with suppress(Exception):
+            body_text = (await dialog.text_content(timeout=1000) or "").strip()
+
+        if "not compatible with your current device" not in body_text:
+            return False
+
+        continue_btn = dialog.locator("button", has_text="Continue").first
+        try:
+            await continue_btn.wait_for(state="visible", timeout=3000)
+            if await continue_btn.is_disabled(timeout=1000):
+                logger.warning("⚠️ Epic 设备不支持弹窗的 Continue 按钮不可点击")
+                return False
+
+            logger.info("ℹ️ Epic 显示设备不支持提示，点击 Continue 继续领取流程")
+            await continue_btn.click(force=True)
+            await page.wait_for_timeout(3000)
+            return True
+        except Exception as err:
+            logger.warning(f"⚠️ 处理 Epic 设备不支持弹窗失败: {err}")
+            return False
+
+    @staticmethod
+    async def _uk_confirm_order(wpc: Any):
         logger.debug("UK confirm order")
         with suppress(TimeoutError):
             accept = wpc.locator("//button[contains(@class, 'payment-confirm__btn')]")
@@ -464,7 +518,11 @@ class EpicGames:
         agent = AgentV(page=page, agent_config=settings)
 
         try:
+            await self._handle_device_not_supported_modal(page)
             wpc, payment_btn = await self._active_purchase_container(page)
+            if await self._handle_device_not_supported_modal(page):
+                wpc, payment_btn = await self._active_purchase_container(page)
+
             logger.debug(f"点击支付按钮: {await payment_btn.text_content()}")
             await payment_btn.click(force=True)
             await page.wait_for_timeout(3000)

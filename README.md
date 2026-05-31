@@ -19,12 +19,12 @@
 
 | 功能 | 说明 |
 |------|------|
-| 自动驾驶 | 一键启动，自动完成登录、验证码识别、游戏领取 |
-| Cookie 托管 | 首次登录后保存 Cookie，后续无需重复登录 |
-| AI 验证码 | 使用 Qwen 视觉模型识别 hCaptcha |
-| 错峰调度 | 智能随机延迟，避免多账号同时触发风控 |
+| 自动驾驶 | 一键启动，自动完成登录、验证码识别、免费游戏领取 |
+| Cookie 托管 | 首次登录后保存 Cookie，后续尽量复用登录态 |
+| AI 验证码 | 使用 SiliconFlow 视觉模型识别 hCaptcha |
+| 错峰调度 | 随机延迟执行，降低多账号同时触发风控概率 |
 | 防滥用保护 | IP 限流 + 恶意账号检测 |
-| 一键部署 | Docker Compose 本地编译，支持 x86/ARM |
+| 一键部署 | Docker Compose 本地编译，支持 x86_64 / ARM64 |
 
 ---
 
@@ -39,14 +39,13 @@ curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/instal
 ```
 
 脚本功能：
+
 - 自动检测系统架构（x86_64 / ARM64）
 - 自动安装 Docker 和 Docker Compose
-- 交互式引导获取 API Key
-- 自动克隆项目并启动
+- 交互式引导配置 SiliconFlow API Key
+- 自动克隆项目并启动服务
 
 首次部署约需 5-10 分钟。
-
----
 
 ### 方式二：手动部署
 
@@ -59,20 +58,27 @@ git clone https://github.com/10000ge10000/epic-kiosk.git
 cd epic-kiosk
 ```
 
-**2. 配置 API Key**
+**2. 配置 SiliconFlow API Key**
 
-方式一（推荐）：创建 `.env` 文件
+推荐使用 `.env`，不要把真实 key 写进 `docker-compose.yml`：
 
 ```bash
 cp .env.example .env
-# 编辑 .env 文件，填写 API Key
+nano .env
 ```
 
-方式二：直接修改 `docker-compose.yml`
+`.env` 示例：
 
-```yaml
-- SILICONFLOW_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```env
+API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+API_BASE_URL=https://api.siliconflow.cn/v1
 ```
+
+SiliconFlow key 获取地址：
+
+- 推荐使用分享链接：[https://cloud.siliconflow.cn/i/OVI2n57p](https://cloud.siliconflow.cn/i/OVI2n57p)
+
+通过该分享链接注册并完成认证后，邀请双方可获得 16 元代金券。登录 SiliconFlow 后进入 API Key 管理页，创建并复制 `sk-` 开头的 key。
 
 **3. 启动**
 
@@ -84,28 +90,33 @@ docker compose up -d --build
 
 ---
 
-### 部署注意事项
+## 部署注意事项
 
-1. **API Key 获取**：[https://cloud.siliconflow.cn/i/OVI2n57p](https://cloud.siliconflow.cn/i/OVI2n57p)（注册送 16 元代金券）
-2. **端口**：默认 `18000`，如需修改请编辑 `docker-compose.yml` 第 51 行
-3. **访问地址**：`http://服务器IP:18000`
+1. 默认 Web 端口是 `18000`，访问地址为 `http://服务器IP:18000`。
+2. 默认 AI 提供商是 SiliconFlow，接口地址为 `https://api.siliconflow.cn/v1`。
+3. `API_KEY` 必须放在 `.env`，`.env` 已被 `.gitignore` 忽略。
+4. 旧版 `API_KEY` / `API_BASE_URL` 仍可兼容读取，但新部署不要再使用旧变量名。
+5. WARP 容器负责访问 Epic Games；如果 Epic 风控严重，可能需要更稳定的住宅代理或更换出口。
 
 ---
 
 ## 使用说明
 
 ### 添加账号
-1. 输入 Epic 邮箱和密码
-2. 点击「启动引擎」
-3. 系统自动处理登录和验证码
+
+1. 输入 Epic 邮箱和密码。
+2. 点击「启动引擎」。
+3. 系统自动处理登录、验证码和免费游戏领取。
 
 ### 查看资产
-- 点击「资产清单」Tab 查看已领取游戏
-- 点击游戏封面跳转 Epic 商店
+
+- 点击「资产清单」Tab 查看已领取游戏。
+- 点击游戏封面跳转 Epic 商店。
 
 ### 删除账号
-- 输入密码后点击红色删除按钮
-- 系统将清除数据库记录和本地 Cookie 数据
+
+- 输入密码后点击红色删除按钮。
+- 系统将清除数据库记录和本地 Cookie 数据。
 
 ---
 
@@ -113,39 +124,51 @@ docker compose up -d --build
 
 ### AI 模型配置
 
+当前默认配置基于 SiliconFlow 实测结果：
+
 | 类型 | 主模型 | 备用模型 | 用途 |
 |------|--------|----------|------|
-| 验证码 | Qwen3-VL-32B-Instruct | Qwen3-VL-235B-A22B-Instruct | hCaptcha 图像识别 |
-| 主力 | Qwen2.5-7B-Instruct（免费） | Qwen2.5-72B-Instruct | 文本任务 |
+| 主力文本 | `deepseek-ai/DeepSeek-V3.2` | `deepseek-ai/DeepSeek-V4-Flash` | 页面判断、流程决策、结构化文本输出 |
+| 验证码视觉 | `Qwen/Qwen3-VL-32B-Instruct` | `Qwen/Qwen3-VL-30B-A3B-Instruct` | hCaptcha 图像识别 |
 
-**智能切换机制**：
-- 验证码连续失败 2 次后自动切换备用模型
-- API 调用异常时自动切换
-- 成功后自动重置为主模型
+相关环境变量：
 
-### 费用估算
+```env
+API_PROVIDER=siliconflow
+API_BASE_URL=https://api.siliconflow.cn/v1
+PRIMARY_MODEL=deepseek-ai/DeepSeek-V3.2
+PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Flash
+CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
+CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+```
 
-- 验证码主模型（32B）：12 元/百万 tokens
-- 验证码备用模型（235B）：7 元/百万 tokens（按 A22B 模式计费）
-- 主力模型：免费
-- 16 元代金券约可完成 1000+ 次领取任务
+智能切换机制：
+
+- 验证码连续调用超过阈值后自动切换备用视觉模型。
+- API 调用异常时自动使用对应备用模型重试一次。
+- 视觉请求和文本请求会按是否包含图片自动选择不同模型。
+
+### 费用与额度
+
+SiliconFlow hosted API 的额度和价格以 SiliconFlow 当前账号页面为准。不同账号、地区、模型和活动政策可能不同，部署前应在 SiliconFlow 控制台确认可用额度。
 
 ---
 
 ## 项目结构
 
-```
+```text
 epic-kiosk/
 ├── app/                    # 核心代码
 │   ├── main.py             # FastAPI 后端
-│   ├── worker.py           # 任务调度器
 │   ├── deploy.py           # 浏览器自动化
+│   ├── settings.py         # 模型/API 配置与 OpenAI 兼容补丁
 │   └── services/           # 业务逻辑
 ├── templates/              # 前端页面
 ├── data/                   # 持久化数据
 │   ├── images/             # 游戏海报
-│   ├── user_data/          # 用户 Cookie
+│   ├── user_data/          # 用户 Cookie / 浏览器 profile
 │   └── logs/               # 日志文件
+├── worker.py               # Redis 队列 Worker
 ├── docker-compose.yml      # 容器编排
 ├── install.sh              # 一键部署脚本
 ├── Dockerfile              # Web 镜像
@@ -157,14 +180,22 @@ epic-kiosk/
 ## 安全机制
 
 ### IP 保护
-- 1 分钟内最多 3 次请求
-- 超限后临时封禁 1 小时
-- 同一 IP 提交超过 5 个不同账号将永久封禁
+
+- 1 分钟内最多 3 次请求。
+- 超限后临时封禁 1 小时。
+- 同一 IP 提交超过 5 个不同账号将永久封禁。
 
 ### 账号保护
-- 同一邮箱任务互斥
-- 已存储账号需验证密码
-- 自动清理浏览器缓存（约 2MB/账号）
+
+- 同一邮箱任务互斥。
+- 已存储账号需验证密码。
+- 自动清理浏览器缓存。
+
+### Key 安全
+
+- 不要把 `API_KEY` 写进 Git 跟踪文件。
+- 不要把 `sk-` key 发到公开聊天、Issue、日志或截图里。
+- 如果 key 泄露，应立即在 SiliconFlow 后台删除并重新生成。
 
 ---
 
@@ -190,27 +221,35 @@ docker compose build worker && docker compose up -d worker
 
 ### 常见问题
 
-**Q: 按钮显示「Requires Base Game」？**
+**Q: 日志提示 `未配置 API_KEY`？**
 
-A: 该游戏需要先拥有基础游戏，属于 DLC，跳过即可。
+A: 检查 `.env` 是否存在，且包含 `API_KEY=sk-...`。修改后执行 `docker compose up -d worker`。
+
+**Q: SiliconFlow API 返回 401 / 403？**
+
+A: key 无效、过期、权限不足或账号额度不可用。通过 [SiliconFlow 分享链接](https://cloud.siliconflow.cn/i/OVI2n57p) 登录后进入 API Key 管理页重新生成 key。
+
+**Q: SiliconFlow API 返回 404？**
+
+A: 通常是模型 ID 不存在或该账号无权使用该模型。先通过 [SiliconFlow 分享链接](https://cloud.siliconflow.cn/i/OVI2n57p) 登录控制台确认模型可用。
 
 **Q: 验证码一直失败？**
 
-A: 检查 API Key 是否正确，余额是否充足。
+A: 先检查 worker 日志中是否出现 `调用 OpenAI 兼容 API`、模型名和 API 错误码；如果没有 API 错误，重点排查 WARP 出口 IP、Epic 风控、验证码类型是否变化。
+
+**Q: 按钮显示 `Requires Base Game`？**
+
+A: 该游戏需要先拥有基础游戏，属于 DLC，跳过即可。
 
 **Q: 日志显示「游戏已在库中」？**
 
 A: 该账号已领取过此游戏，正常现象。
 
-**Q: 服务器 IP 被 Cloudflare 拦截？**
-
-A: 数据中心 IP 可能被标记，建议配置住宅代理或使用公益站点。
-
 ### 查看日志
 
 ```bash
 # Worker 日志（实时）
-docker logs epic-worker --tail 50
+docker logs epic-worker --tail 50 -f
 
 # 日志文件（按日期分类）
 ls data/logs/
@@ -236,16 +275,17 @@ docker compose build --no-cache && docker compose up -d
 
 ## 相关文档
 
-- [API Key 获取指南](docs/API_KEY_GUIDE.md)
 - [快速开始指南](docs/QUICKSTART.md)
 - [模型配置说明](docs/MODEL_CONFIG.md)
+
+> 注意：部分旧文档可能仍保留历史 SiliconFlow 配置说明，当前 README 和 `.env.example` 以 SiliconFlow 配置为准。
 
 ---
 
 ## 致谢
 
 - 原项目：[QIN2DIM/epic-awesome-gamer](https://github.com/QIN2DIM/epic-awesome-gamer)
-- AI 服务：[SiliconFlow](https://cloud.siliconflow.cn/i/OVI2n57p)
+- AI 服务：[SiliconFlow 分享链接](https://cloud.siliconflow.cn/i/OVI2n57p)
 
 ---
 

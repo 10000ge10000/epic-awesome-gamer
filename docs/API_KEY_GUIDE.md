@@ -45,7 +45,7 @@
 编辑 `docker-compose.yml` 文件：
 
 ```yaml
-- SILICONFLOW_API_KEY=sk-xxxxxxxx  # 粘贴你的 API Key
+- API_KEY=sk-xxxxxxxx  # 粘贴你的 API Key
 ```
 
 ---
@@ -95,6 +95,6 @@ A: 请勿在公开场合泄露 API Key。本项目所有配置文件仅供本地
 
 ## 🔗 相关链接
 
-- [SiliconFlow 官网（邀请链接）](https://cloud.siliconflow.cn/i/OVI2n57p) - 注册获 ¥16 代金券
+- [SiliconFlow 官网（邀请链接）](https://cloud.siliconflow.cn/i/OVI2n57p) - 注册双方可获 ¥16 代金券
 - [项目公益站点](https://epic.910501.xyz/) - 免费体验
 - [项目 README](../README.md)

@@ -9,7 +9,7 @@
 #   1. Linux 一键部署: curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
 #   2. 手动部署: 克隆项目 → 修改 API Key → docker compose up -d --build
 #
-# ⚠️ 必须修改: SILICONFLOW_API_KEY
+# ⚠️ 必须修改: API_KEY
 #    获取地址: https://cloud.siliconflow.cn/i/OVI2n57p
 #
 # 📦 镜像说明：
@@ -121,7 +121,7 @@ services:
       - PYTHONUNBUFFERED=1
       - ENABLE_APSCHEDULER=false
       - API_PROVIDER=siliconflow
-      - SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+      - API_BASE_URL=https://api.siliconflow.cn/v1
       # WARP HTTP 代理（容器内部网络）
       - HTTP_PROXY=http://epic-warp:19000
       - HTTPS_PROXY=http://epic-warp:19000
@@ -134,25 +134,24 @@ services:
       # ⚠️⚠️⚠️ 必须配置 API Key ⚠️⚠️⚠️
       # ============================================================
       # 方式一：直接修改下方环境变量（不推荐，会暴露在配置文件中）
-      # 方式二：创建 .env 文件，添加 SILICONFLOW_API_KEY=sk-xxx（推荐）
+      # 方式二：创建 .env 文件，添加 API_KEY=sk-xxx（推荐）
       # ============================================================
       # 获取步骤：
-      # 1. 访问邀请链接: https://cloud.siliconflow.cn/i/OVI2n57p
-      # 2. 注册账号并完成实名认证
-      # 3. 双方各得 ¥16 代金券（可领 1500+ 次任务）
-      # 4. 在控制台创建 API Key
+      # 1. 访问分享链接 https://cloud.siliconflow.cn/i/OVI2n57p
+      # 2. 登录 SiliconFlow 账号
+      # 3. 进入 API Key 管理页创建新密钥；通过分享链接注册认证后，双方可获得 16 元代金券
+      # 4. 复制 sk- 开头的 API Key
       # ============================================================
-      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY:-sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+      - API_KEY=${API_KEY:-sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
       # 环境变量（绕过父类验证器，无需修改）
       - GEMINI_API_KEY=not_used
       # ============================================================
-      # 模型配置（已优化验证码识别能力）
-      # 主模型: Qwen2.5-VL-32B-Instruct (性价比高，速度快)
-      # 备用模型: Qwen2.5-VL-72B-Instruct (能力更强)
-      - CAPTCHA_MODEL=Qwen/Qwen2.5-VL-32B-Instruct
-      - CAPTCHA_MODEL_FALLBACK=Qwen/Qwen2.5-VL-72B-Instruct
-      - PRIMARY_MODEL=Qwen/Qwen2.5-7B-Instruct
-      - PRIMARY_MODEL_FALLBACK=Qwen/Qwen2.5-72B-Instruct
+      # 模型配置（SiliconFlow 实测通过）
+      - CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
+      - CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+      - PRIMARY_MODEL=deepseek-ai/DeepSeek-V3.2
+      - PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Flash
+      - RESPONSE_TIMEOUT=120
     depends_on:
       redis:
         condition: service_healthy
