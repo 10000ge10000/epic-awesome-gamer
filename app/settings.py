@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Epic Kiosk 配置模块
-支持 SiliconFlow API（OpenAI 兼容格式）
+支持 SiliconFlow / OpenAI 兼容格式 API
 """
 import os
 import re
@@ -29,29 +29,30 @@ RECORD_DIR = VOLUMES_DIR.joinpath("record")
 # ==========================================
 # API 提供商配置
 # ==========================================
-# 可选值: "siliconflow" (默认，推荐)
+# 默认使用 SiliconFlow；保留 API_PROVIDER 仅用于日志和部署标识。
 API_PROVIDER = os.getenv("API_PROVIDER", "siliconflow")
 
 # === 配置类定义 ===
 class EpicSettings(AgentConfig):
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
 
-    # [基础配置] SiliconFlow API Key
-    SILICONFLOW_API_KEY: SecretStr | None = Field(
-        default_factory=lambda: os.getenv("SILICONFLOW_API_KEY"),
-        description="SiliconFlow API Key",
+    # [基础配置] OpenAI 兼容 API Key
+    # 新部署使用 API_KEY；兼容旧版 SILICONFLOW_API_KEY，避免已有 .env 直接失效。
+    API_KEY: SecretStr | None = Field(
+        default_factory=lambda: os.getenv("API_KEY") or os.getenv("SILICONFLOW_API_KEY"),
+        description="OpenAI-compatible API Key",
     )
 
-    # 覆盖父类的 GEMINI_API_KEY，使其变为可选（我们使用 SiliconFlow）
+    # 覆盖父类的 GEMINI_API_KEY，使其变为可选（本项目通过兼容层调用模型）
     GEMINI_API_KEY: SecretStr | None = Field(
         default=SecretStr(""),
-        description="Gemini API Key（本项目使用 SiliconFlow，此字段无需配置）",
+        description="Gemini API Key（本项目无需配置）",
     )
 
-    # API 基础地址
-    SILICONFLOW_BASE_URL: str = Field(
-        default=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
-        description="SiliconFlow API 基础地址",
+    # API 基础地址；新部署使用 API_BASE_URL；兼容旧版 SILICONFLOW_BASE_URL。
+    API_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv("API_BASE_URL") or os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
+        description="OpenAI-compatible API base URL",
     )
 
     # === 全局统一模型配置 ===
@@ -63,40 +64,40 @@ class EpicSettings(AgentConfig):
 
     # === 验证码模型（需要视觉能力）===
     CAPTCHA_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"),
-        description="验证码识别模型（主力，便宜）",
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        description="验证码识别模型（主力）",
     )
     CAPTCHA_MODEL_FALLBACK: str = Field(
-        default=os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen2.5-VL-72B-Instruct"),
-        description="验证码识别模型（备用，更强）",
+        default=os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen3-VL-30B-A3B-Instruct"),
+        description="验证码识别模型（备用）",
     )
 
     # === 主力模型（一般文本任务）===
     PRIMARY_MODEL: str = Field(
-        default=os.getenv("PRIMARY_MODEL", "Qwen/Qwen2.5-7B-Instruct"),
-        description="主力文本模型（免费）",
+        default=os.getenv("PRIMARY_MODEL", "deepseek-ai/DeepSeek-V3.2"),
+        description="主力文本模型",
     )
     PRIMARY_MODEL_FALLBACK: str = Field(
-        default=os.getenv("PRIMARY_MODEL_FALLBACK", "Qwen/Qwen2.5-72B-Instruct"),
+        default=os.getenv("PRIMARY_MODEL_FALLBACK", "deepseek-ai/DeepSeek-V4-Flash"),
         description="主力文本模型（备用）",
     )
 
     # === hcaptcha-challenger 内置模型配置（必须覆盖默认值）===
     # 这些属性会覆盖 AgentConfig 的默认 gemini 模型名称
     CHALLENGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
         description="挑战分类模型",
     )
     IMAGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
         description="图像分类模型 (image_label_binary)",
     )
     SPATIAL_POINT_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
         description="空间点推理模型 (image_label_area_select)",
     )
     SPATIAL_PATH_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
         description="空间路径推理模型 (image_drag_drop)",
     )
 
@@ -138,26 +139,21 @@ logger.info(f"🔐 验证码模型: {settings.CAPTCHA_MODEL} (备用: {settings.
 logger.info(f"🤖 主力模型: {settings.PRIMARY_MODEL} (备用: {settings.PRIMARY_MODEL_FALLBACK})")
 
 # ==========================================
-# SiliconFlow OpenAI 兼容补丁
-# 注意：视觉模型不支持 response_format: json_object
+# OpenAI 兼容 API 补丁
+# 注意：部分视觉模型不支持 response_format: json_object
 # 解决方案：从响应中提取 JSON 代码块
 # ==========================================
-def _apply_siliconflow_patch():
+def _apply_openai_compatible_patch():
     """
-    SiliconFlow OpenAI 兼容 API
+    OpenAI 兼容 API 调用层。
 
-    关键发现：
-    - SiliconFlow 视觉模型不支持 response_format: json_object
-    - 但可以正确返回 ```json 代码块
-    - 需要从响应中手动提取 JSON
-
-    推荐模型（按性价比排序）：
-    1. Qwen/Qwen2-VL-72B-Instruct (¥4/百万，最快)
-    2. Qwen/Qwen2.5-VL-32B-Instruct (¥12/百万，延迟最低)
-    3. Qwen/Qwen2.5-VL-72B-Instruct (¥40/百万，效果最好)
+    默认使用 SiliconFlow：
+    - Base URL: https://api.siliconflow.cn/v1
+    - API Key 获取地址: https://cloud.siliconflow.cn/i/OVI2n57p
+    - 视觉和文本模型均通过 /v1/chat/completions 调用
     """
-    if not settings.SILICONFLOW_API_KEY:
-        logger.warning("⚠️ 未配置 SILICONFLOW_API_KEY，请从 https://cloud.siliconflow.cn/ 获取 API Key")
+    if not settings.API_KEY:
+        logger.warning("⚠️ 未配置 API_KEY，请从 https://cloud.siliconflow.cn/i/OVI2n57p 获取 SiliconFlow API Key")
         return
 
     try:
@@ -166,16 +162,16 @@ def _apply_siliconflow_patch():
         import httpx
 
         # 获取 API Key
-        if hasattr(settings.SILICONFLOW_API_KEY, 'get_secret_value'):
-            api_key = settings.SILICONFLOW_API_KEY.get_secret_value()
+        if hasattr(settings.API_KEY, 'get_secret_value'):
+            api_key = settings.API_KEY.get_secret_value()
         else:
-            api_key = str(settings.SILICONFLOW_API_KEY)
+            api_key = str(settings.API_KEY)
 
-        base_url = settings.SILICONFLOW_BASE_URL.rstrip('/')
+        base_url = settings.API_BASE_URL.rstrip('/')
         if base_url.endswith('/v1'):
             base_url = base_url[:-3]
 
-        logger.info(f"🚀 SiliconFlow 补丁加载中... | 地址: {base_url}")
+        logger.info(f"🚀 OpenAI 兼容补丁加载中... | 地址: {base_url}")
 
         # ==========================================
         # 辅助函数：将 Gemini contents 转换为 OpenAI messages
@@ -319,8 +315,8 @@ def _apply_siliconflow_patch():
             system_instruction: str = None,
         ) -> Any:
             """
-            调用 SiliconFlow OpenAI 兼容 API
-            注意：不使用 response_format，因为视觉模型不支持
+            调用 OpenAI 兼容 API
+            注意：不使用 response_format，因为部分视觉模型不支持
             """
             url = f"{base_url}/v1/chat/completions"
 
@@ -361,7 +357,7 @@ JSON Schema:
                 "messages": final_messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                # 注意：不使用 response_format，SiliconFlow 视觉模型不支持
+                # 注意：不使用 response_format，部分视觉模型不支持
             }
 
             async with httpx.AsyncClient(timeout=120.0) as client:
@@ -383,7 +379,7 @@ JSON Schema:
             kwargs['api_key'] = api_key
             kwargs['http_options'] = types.HttpOptions(base_url="https://generativelanguage.googleapis.com")
             current_model = kwargs.get('model', settings.GEMINI_MODEL)
-            logger.info(f"🚀 SiliconFlow 补丁已应用 | 模型: {current_model}")
+            logger.info(f"🚀 OpenAI 兼容补丁已应用 | 模型: {current_model}")
             orig_init(self, *args, **kwargs)
 
         genai.Client.__init__ = new_init
@@ -499,7 +495,7 @@ JSON Schema:
                 else:
                     selected_model = settings.PRIMARY_MODEL
 
-                logger.debug(f"🤖 调用 SiliconFlow API | 模型: {selected_model} | 图片: {is_captcha_task}")
+                logger.debug(f"🤖 调用 OpenAI 兼容 API | 模型: {selected_model} | 图片: {is_captcha_task}")
 
                 # 提取配置参数
                 config = kwargs.get('config', {})
@@ -618,17 +614,17 @@ JSON Schema:
                     raise
 
         genai.models.AsyncModels.generate_content = patched_generate
-        logger.info("✅ SiliconFlow OpenAI 兼容补丁加载成功")
+        logger.info("✅ OpenAI 兼容补丁加载成功")
 
     except Exception as e:
-        logger.error(f"❌ 严重：SiliconFlow 补丁加载失败! 原因: {e}")
+        logger.error(f"❌ 严重：OpenAI 兼容补丁加载失败! 原因: {e}")
         import traceback
         traceback.print_exc()
 
 # ==========================================
-# 加载 SiliconFlow 补丁
+# 加载 OpenAI 兼容补丁
 # ==========================================
-_apply_siliconflow_patch()
+_apply_openai_compatible_patch()
 
 # 导出
 __all__ = ['settings']

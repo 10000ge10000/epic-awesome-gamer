@@ -54,7 +54,7 @@ CONSOLE_KEYWORDS = [
 SUPPRESS_KEYWORDS = [
     "原始响应",
     "JSON 解析",
-    "调用 SiliconFlow API",
+    "调用 OpenAI 兼容 API",
     "文件已缓存",
     "response_schema",
     "备用模型",

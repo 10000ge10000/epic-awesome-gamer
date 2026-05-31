@@ -205,41 +205,36 @@ clone_project() {
 
 # API Key 配置向导
 configure_api_key() {
-    print_step "配置 API Key"
+    print_step "配置 SiliconFlow API Key"
 
-    echo -e "${CYAN}硅基流动 (SiliconFlow) 是什么？${NC}"
-    echo "  国内 AI 模型推理平台，提供 Qwen 等开源模型的 API 服务"
-    echo -e "  特点：价格低、速度快、主力模型${RED}免费${NC}使用"
+    echo -e "${CYAN}SiliconFlow 是什么？${NC}"
+    echo "  SiliconFlow 是国内常用的 OpenAI 兼容模型 API 平台，兼容 /v1/chat/completions 接口"
+    echo "  本项目默认使用 SiliconFlow 的文本模型和视觉模型处理流程判断与 hCaptcha"
     echo ""
     echo -e "${GREEN}获取 API Key 步骤：${NC}"
     echo ""
-    echo -e "${CYAN}1. 访问邀请链接${NC}"
+    echo -e "${CYAN}1. 访问 SiliconFlow 分享链接${NC}"
     echo -e "   ${YELLOW}https://cloud.siliconflow.cn/i/OVI2n57p${NC}"
-    echo "   （双方各得 ¥16 代金券）"
     echo ""
-    echo -e "${CYAN}2. 注册账号${NC}"
-    echo "   支持手机号/微信注册"
+    echo -e "${CYAN}2. 登录 SiliconFlow 账号${NC}"
+    echo "   如果页面要求验证，请按 SiliconFlow 当前流程完成验证"
     echo ""
     echo -e "${CYAN}3. 创建 API Key${NC}"
-    echo "   控制台 → API 密钥 → 创建新密钥"
-    echo "   复制生成的密钥（以 sk- 开头）"
+    echo "   进入 API Key 管理页创建新密钥"
+    echo "   访问 https://cloud.siliconflow.cn/i/OVI2n57p"
+    echo "   复制生成的密钥（通常以 sk- 开头）；通过分享链接注册认证后，双方可获得 16 元代金券"
     echo ""
 
-    # 检查是否已配置 API Key（排除注释行，只匹配实际配置）
-    if [ -f "docker-compose.yml" ]; then
-        # 只匹配以 "- SILICONFLOW_API_KEY=" 开头的行，排除注释
-        current_key=$(grep -E "^\s*-\s+SILICONFLOW_API_KEY=" docker-compose.yml | head -1 | sed 's/.*SILICONFLOW_API_KEY=//')
-        # 提取实际值：处理 ${VAR:-default} 格式，只取 default 部分
-        if [[ "$current_key" =~ ^\$\{[^}]+:-([^}]+)\}$ ]]; then
-            current_key="${BASH_REMATCH[1]}"
-        fi
-        if [[ "$current_key" != "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" && "$current_key" =~ ^sk-[a-zA-Z0-9]+$ ]]; then
+    # 检查 .env 是否已配置 API_KEY
+    if [ -f ".env" ]; then
+        current_key=$(grep -E "^API_KEY=" .env | head -1 | sed 's/API_KEY=//')
+        if [[ "$current_key" =~ ^sk- && "$current_key" != "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ]]; then
             print_success "已检测到 API Key: ${current_key:0:10}...${current_key: -4}"
             read -p "是否使用现有 Key? [Y/n]: " use_existing < /dev/tty
             use_existing=${use_existing:-Y}
 
             if [[ "$use_existing" =~ ^[Yy]$ ]]; then
-                SILICONFLOW_API_KEY="$current_key"
+                API_KEY="$current_key"
                 return 0
             fi
         fi
@@ -248,7 +243,7 @@ configure_api_key() {
     # 输入 API Key（从 /dev/tty 读取，支持 curl | bash 管道运行）
     while true; do
         echo ""
-        read -p "请输入你的 API Key (sk-xxx): " api_key < /dev/tty
+        read -p "请输入你的 SiliconFlow API Key (sk-xxx): " api_key < /dev/tty
 
         if [[ -z "$api_key" ]]; then
             print_error "API Key 不能为空"
@@ -256,16 +251,16 @@ configure_api_key() {
         fi
 
         if [[ ! "$api_key" =~ ^sk- ]]; then
-            print_warning "API Key 通常以 sk- 开头，请确认"
+            print_warning "SiliconFlow API Key 通常以 sk- 开头，请确认"
         fi
 
         echo ""
-        echo -e "你输入的: ${YELLOW}${api_key}${NC}"
+        echo -e "你输入的: ${YELLOW}${api_key:0:10}...${api_key: -4}${NC}"
         read -p "确认无误? [Y/n]: " confirm_key < /dev/tty
         confirm_key=${confirm_key:-Y}
 
         if [[ "$confirm_key" =~ ^[Yy] ]]; then
-            SILICONFLOW_API_KEY="$api_key"
+            API_KEY="$api_key"
             break
         fi
     done
@@ -279,18 +274,32 @@ deploy_service() {
 
     cd "$PROJECT_DIR"
 
-    # 替换 API Key
+    # 写入 .env，避免把真实 key 固化到 docker-compose.yml
     print_info "配置 API Key..."
-    if [ -f "docker-compose.yml" ]; then
-        # 使用 sed 替换 API Key（兼容 macOS 和 Linux）
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' "s|SILICONFLOW_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|SILICONFLOW_API_KEY=$SILICONFLOW_API_KEY|g" docker-compose.yml
+    if [ -f ".env.example" ] && [ ! -f ".env" ]; then
+        cp .env.example .env
+    fi
+
+    if [ -f ".env" ]; then
+        if grep -qE "^API_KEY=" .env; then
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                sed -i '' "s|^API_KEY=.*|API_KEY=$API_KEY|g" .env
+            else
+                sed -i "s|^API_KEY=.*|API_KEY=$API_KEY|g" .env
+            fi
         else
-            sed -i "s|SILICONFLOW_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|SILICONFLOW_API_KEY=$SILICONFLOW_API_KEY|g" docker-compose.yml
+            printf "
+API_KEY=%s
+" "$API_KEY" >> .env
         fi
-        print_success "API Key 已写入 docker-compose.yml"
+
+        if ! grep -qE "^API_BASE_URL=" .env; then
+            printf "API_BASE_URL=https://api.siliconflow.cn/v1
+" >> .env
+        fi
+        print_success "API Key 已写入 .env"
     else
-        print_error "docker-compose.yml 不存在"
+        print_error ".env 不存在且无法创建"
         exit 1
     fi
 

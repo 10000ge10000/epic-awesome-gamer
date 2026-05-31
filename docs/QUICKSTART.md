@@ -4,7 +4,7 @@
 
 ```bash
 # 设置 API Key 并一键部署
-export SILICONFLOW_API_KEY="sk-你的Key"
+export API_KEY="sk-你的Key"
 curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
 ```
 
@@ -38,9 +38,9 @@ cd epic-kiosk
 ```
 
 ### 2️⃣ 配置 API Key
-编辑 `docker-compose.yml`，找到 `SILICONFLOW_API_KEY` 配置项：
+编辑 `docker-compose.yml`，找到 `API_KEY` 配置项：
 ```yaml
-- SILICONFLOW_API_KEY=sk-你的Key  # 替换为你的 SiliconFlow API Key
+- API_KEY=sk-你的Key  # 替换为你的 SiliconFlow API Key
 ```
 
 ### 3️⃣ 构建并启动

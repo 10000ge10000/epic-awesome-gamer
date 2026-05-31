@@ -101,7 +101,7 @@ CAPTCHA_MODEL_FALLBACK: str = Field(default="Qwen/Qwen2.5-VL-72B-Instruct")
 
 ```yaml
 environment:
-  - SILICONFLOW_API_KEY=sk-xxx  # 修改为你的 SiliconFlow API Key
+  - API_KEY=sk-xxx  # 修改为你的 SiliconFlow API Key
 ```
 
 **重要说明**：
@@ -159,5 +159,5 @@ docker logs epic-worker -f
 
 ## 🔗 相关文档
 
-- [SiliconFlow 官网（邀请链接）](https://cloud.siliconflow.cn/i/OVI2n57p) - 注册获 ¥16 代金券
+- [SiliconFlow 官网（邀请链接）](https://cloud.siliconflow.cn/i/OVI2n57p) - 注册双方可获 ¥16 代金券
 - [项目主 README](../README.md)

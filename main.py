@@ -292,7 +292,16 @@ def daily_job():
 
 scheduler = AsyncIOScheduler()
 scheduler.add_job(daily_job, 'cron', hour=12, minute=0)
-scheduler.start()
+
+@app.on_event("startup")
+async def start_scheduler():
+    if not scheduler.running:
+        scheduler.start()
+
+@app.on_event("shutdown")
+async def stop_scheduler():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
 
 # --- 📊 系统状态与免费游戏 API ---
 
