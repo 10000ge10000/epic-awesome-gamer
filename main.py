@@ -6,6 +6,7 @@ import shutil
 import random
 import httpx
 import re
+import secrets
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -21,6 +22,9 @@ templates = Jinja2Templates(directory="templates")
 IMAGES_DIR = "/app/data/images"
 os.makedirs(IMAGES_DIR, exist_ok=True)
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
+MANUAL_LOGIN_DIR = "/app/data/manual_login"
+os.makedirs(MANUAL_LOGIN_DIR, exist_ok=True)
+app.mount("/manual_login", StaticFiles(directory=MANUAL_LOGIN_DIR), name="manual_login")
 
 DATA_DIR = "/app/data"
 DB_PATH = os.path.join(DATA_DIR, "kiosk.db")
@@ -43,6 +47,13 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS accounts (email TEXT PRIMARY KEY, password TEXT)''')
+    existing_cols = {row[1] for row in c.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "auth_method" not in existing_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN auth_method TEXT DEFAULT 'password'")
+    if "login_updated_at" not in existing_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN login_updated_at TEXT")
+    if "login_expires_hint" not in existing_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN login_expires_hint TEXT")
     c.execute('''CREATE TABLE IF NOT EXISTS logs 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   email TEXT, game_title TEXT, image_url TEXT, claim_time TEXT)''')
@@ -65,6 +76,22 @@ class GameLog(BaseModel):
     email: str
     game_title: str
     image_filename: str
+
+class ManualLoginStart(BaseModel):
+    email: str
+
+class ManualLoginControl(BaseModel):
+    session_id: str
+    type: str
+    x: float | None = None
+    y: float | None = None
+    text: str | None = None
+    key: str | None = None
+    url: str | None = None
+
+class ManualLoginComplete(BaseModel):
+    email: str
+    session_id: str
 
 # --- 🛡️ 防滥用中间件 (多层防护) ---
 @app.middleware("http")
@@ -138,6 +165,31 @@ def _perform_physical_delete(email):
     
     return "，".join(log_msgs)
 
+def _login_expire_hint() -> str:
+    return "Epic 登录态通常可维持数天到数周；系统检测到失效时会提示重新授权。"
+
+def _save_cookie_only_account(email: str):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT OR REPLACE INTO accounts (email, password, auth_method, login_updated_at, login_expires_hint)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (email, "__COOKIE_ONLY__", "browser", now, _login_expire_hint()),
+    )
+    conn.commit()
+    conn.close()
+
+def _get_account_auth(email: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT password, COALESCE(auth_method, 'password'), login_updated_at, login_expires_hint FROM accounts WHERE email=?", (email,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
 # --- API 接口 ---
 
 @app.get("/", response_class=HTMLResponse)
@@ -165,13 +217,11 @@ async def deposit(account: Account, request: Request):
         return {"status": "busy", "msg": "⏳ 该账号有任务正在执行中，请稍后再试"}
 
     # 2. 如果是已存储账号，验证密码
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT password FROM accounts WHERE email=?", (email,))
-    row = c.fetchone()
-    conn.close()
+    row = _get_account_auth(email)
 
-    if row and row[0] != password:
+    if row and row[1] == "browser":
+        password = row[0]
+    elif row and row[0] != password:
         return {"status": "auth_failed", "msg": "❌ 密码错误，无法操作此账号"}
 
     # 3. 记录 IP 提交的账号（用于检测恶意刷量）
@@ -198,13 +248,9 @@ async def deposit(account: Account, request: Request):
 @app.post("/api/delete_account")
 async def delete_account(account: Account):
     """用户手动删除接口（需要验证密码）"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT password FROM accounts WHERE email=?", (account.email,))
-    row = c.fetchone()
-    conn.close()
+    row = _get_account_auth(account.email)
     
-    if row and row[0] != account.password:
+    if row and row[1] != "browser" and row[0] != account.password:
         return {"status": "fail", "msg": "密码错误，无法删除"}
     
     msg = _perform_physical_delete(account.email)
@@ -226,11 +272,97 @@ async def get_status(email: str):
     if not status_msg: return {"status": "waiting", "msg": "Waiting..."}
     return {"status": "processing", "msg": status_msg, "result": result, "game_title": last_game, "hint": hint}
 
+@app.post("/api/manual_login/start")
+async def start_manual_login(req: ManualLoginStart, request: Request):
+    email = req.email.strip()
+    if not email or "@" not in email:
+        return {"status": "fail", "msg": "请输入有效邮箱"}
+
+    current_status = r.get(f"status:{email}")
+    if current_status and not current_status.startswith(("🎉", "❌", "✅", "⚠️", "⚪")):
+        return {"status": "busy", "msg": "该账号有任务正在执行中，请稍后再试"}
+
+    session_id = secrets.token_urlsafe(24)
+    task = {
+        "email": email,
+        "password": "__COOKIE_ONLY__",
+        "mode": "manual_login",
+        "session_id": session_id,
+        "client_ip": request.client.host,
+    }
+    r.setex(f"manual_login:owner:{session_id}", 900, email)
+    r.delete(f"status:{email}")
+    r.delete(f"result:{email}")
+    r.rpush("task_queue", json.dumps(task, ensure_ascii=False))
+    return {
+        "status": "queued",
+        "msg": "远程登录会话已创建，请在画面中完成 Epic 登录",
+        "session_id": session_id,
+        "expires_in": 900,
+    }
+
+@app.get("/api/manual_login/status/{session_id}")
+async def manual_login_status(session_id: str):
+    raw = r.get(f"manual_login:status:{session_id}")
+    if not raw:
+        return {"status": "waiting", "msg": "等待远程浏览器启动..."}
+    return json.loads(raw)
+
+@app.post("/api/manual_login/control")
+async def manual_login_control(cmd: ManualLoginControl):
+    owner = r.get(f"manual_login:owner:{cmd.session_id}")
+    if not owner:
+        return {"status": "fail", "msg": "登录会话已过期"}
+    payload = cmd.dict(exclude_none=True)
+    r.rpush(f"manual_login:control:{cmd.session_id}", json.dumps(payload, ensure_ascii=False))
+    r.expire(f"manual_login:control:{cmd.session_id}", 900)
+    return {"status": "ok"}
+
+@app.post("/api/manual_login/cancel")
+async def manual_login_cancel(cmd: ManualLoginControl):
+    owner = r.get(f"manual_login:owner:{cmd.session_id}")
+    if not owner:
+        return {"status": "ok", "msg": "登录会话已结束"}
+    payload = {"type": "cancel", "session_id": cmd.session_id}
+    r.rpush(f"manual_login:control:{cmd.session_id}", json.dumps(payload, ensure_ascii=False))
+    r.expire(f"manual_login:control:{cmd.session_id}", 60)
+    return {"status": "ok", "msg": "已取消浏览器授权会话"}
+
+@app.post("/api/manual_login/complete")
+async def manual_login_complete(req: ManualLoginComplete):
+    owner = r.get(f"manual_login:owner:{req.session_id}")
+    if owner != req.email:
+        return {"status": "fail", "msg": "登录会话校验失败"}
+    _save_cookie_only_account(req.email)
+    r.setex(f"result:{req.email}", 3600, "success")
+    r.setex(f"status:{req.email}", 3600, "✅ 浏览器授权登录成功")
+    return {"status": "success", "msg": "浏览器登录态已保存", "hint": _login_expire_hint()}
+
+@app.post("/api/check_login_state")
+async def check_login_state(account: QueryAccount):
+    row = _get_account_auth(account.email)
+    if not row:
+        return {"status": "fail", "msg": "账号不存在"}
+    task = {"email": account.email, "password": row[0], "mode": "check_login"}
+    r.delete(f"status:{account.email}")
+    r.delete(f"result:{account.email}")
+    r.rpush("task_queue", json.dumps(task, ensure_ascii=False))
+    return {"status": "queued", "msg": "已加入登录态检测队列"}
+
 @app.post("/api/confirm_success")
 async def save_account(account: Account):
+    row = _get_account_auth(account.email)
+    if row and row[1] == "browser":
+        return {"status": "saved", "auth_method": "browser", "hint": row[3] or _login_expire_hint()}
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO accounts (email, password) VALUES (?, ?)", (account.email, account.password))
+    c.execute(
+        """
+        INSERT OR REPLACE INTO accounts (email, password, auth_method, login_updated_at, login_expires_hint)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (account.email, account.password, "password", datetime.now().strftime("%Y-%m-%d %H:%M"), _login_expire_hint()),
+    )
     conn.commit()
     conn.close()
     return {"status": "saved"}

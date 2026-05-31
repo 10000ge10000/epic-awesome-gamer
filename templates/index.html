@@ -530,6 +530,14 @@
                                     <span>启动引擎</span>
                                 </button>
 
+                                <button onclick="startManualLogin()" id="btn-manual-login" class="w-full bg-slate-800 border border-blue-500/40 text-blue-200 hover:bg-blue-900/20 hover:border-blue-400 font-semibold py-3 rounded-xl transition-all">
+                                    浏览器授权登录（不保存密码）
+                                </button>
+
+                                <button onclick="checkLoginState()" id="btn-check-login" class="w-full bg-transparent border border-slate-600 text-slate-300 hover:bg-slate-800 hover:text-white font-semibold py-3 rounded-xl transition-all">
+                                    检测登录态
+                                </button>
+
                                 <button onclick="deleteAccount()" id="btn-delete" class="w-full bg-transparent border border-red-800/50 text-red-400 hover:bg-red-900/20 hover:border-red-500 hover:text-red-300 font-semibold py-3 rounded-xl transition-all">
                                     停止托管 / 删除账号
                                 </button>
@@ -617,6 +625,38 @@
                 <div class="flex flex-col gap-3">
                     <a id="modal-game-link" href="https://store.epicgames.com/" target="_blank" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-all">前往查看</a>
                     <button onclick="closeModal()" class="w-full bg-transparent border border-slate-700 hover:bg-slate-800 text-slate-400 font-bold py-3 rounded-xl transition-all">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 浏览器授权登录弹窗 -->
+        <div id="manual-login-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm hidden">
+            <div class="bg-slate-900 border border-slate-700 p-4 rounded-2xl shadow-2xl w-[94vw] max-w-6xl modal-enter relative mx-4">
+                <div class="flex items-center justify-between gap-4 mb-3">
+                    <div>
+                        <h3 class="text-lg font-bold text-white">浏览器授权登录</h3>
+                        <p id="manual-login-status" class="text-sm text-slate-400 mt-1">正在启动远程浏览器...</p>
+                    </div>
+                    <button onclick="closeManualLoginModal()" class="text-slate-400 hover:text-white text-2xl leading-none">×</button>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-4">
+                    <div class="bg-black rounded-xl overflow-hidden border border-slate-700">
+                        <img id="manual-login-screen" src="" alt="远程浏览器画面" class="w-full aspect-video object-contain cursor-crosshair select-none" onclick="sendManualClick(event)">
+                    </div>
+                    <div class="space-y-3">
+                        <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-3 text-sm text-blue-100">
+                            在左侧画面中点击输入框，然后在下方输入文字并发送。密码只会作为一次性键盘输入发送，不会保存到数据库。
+                        </div>
+                        <input id="manual-login-text" type="text" placeholder="输入要发送到浏览器的文字" class="w-full bg-slate-950 border border-slate-700 text-white px-3 py-3 rounded-lg focus:outline-none focus:border-blue-500">
+                        <div class="grid grid-cols-2 gap-2">
+                            <button onclick="sendManualText()" class="bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-semibold">发送文字</button>
+                            <button onclick="sendManualKey('Enter')" class="bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-lg font-semibold">Enter</button>
+                            <button onclick="sendManualKey('Tab')" class="bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-lg font-semibold">Tab</button>
+                            <button onclick="sendManualKey('Backspace')" class="bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-lg font-semibold">退格</button>
+                        </div>
+                        <button onclick="sendManualGotoLogin()" class="w-full border border-slate-600 hover:bg-slate-800 text-slate-200 py-3 rounded-lg font-semibold">回到 Epic 登录页</button>
+                        <p class="text-xs text-slate-500 leading-relaxed">登录成功后系统会自动保存浏览器登录态。登录态通常可维持数天到数周，Epic 要求重新登录时页面会提醒你回来重新授权。</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -824,6 +864,9 @@
 
         // 自动驾驶
         let pollTimer;
+        let manualLoginSession = null;
+        let manualLoginTimer = null;
+
         async function startVerify() {
             const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
             if (!email || !password) { showToast('请输入邮箱和密码', 'warning'); return; }
@@ -844,13 +887,120 @@
 
         async function deleteAccount() {
             const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
-            if (!email || !password) { showToast('请输入账号密码确认身份', 'warning'); return; }
+            if (!email) { showToast('请输入邮箱', 'warning'); return; }
             if (!confirm('确定删除此账号托管？')) return;
             try {
-                const res = await axios.post('/api/delete_account', { email, password });
+                const res = await axios.post('/api/delete_account', { email, password: password || '' });
                 showToast(res.data.msg, res.data.status === 'success' ? 'success' : 'error');
                 if (res.data.status === 'success') { document.getElementById('d_email').value = ''; document.getElementById('d_password').value = ''; localStorage.removeItem('remembered_email'); document.getElementById('remember_email').checked = false; }
             } catch (e) { showToast('删除失败', 'error'); }
+        }
+
+        async function startManualLogin() {
+            const email = document.getElementById('d_email').value;
+            if (!email) { showToast('请输入邮箱', 'warning'); return; }
+            saveRememberedEmail(email);
+            document.getElementById('manual-login-modal').classList.remove('hidden');
+            document.getElementById('manual-login-status').textContent = '正在创建远程登录会话...';
+            document.getElementById('manual-login-screen').src = '';
+
+            try {
+                const res = await axios.post('/api/manual_login/start', { email });
+                if (res.data.status !== 'queued') {
+                    showToast(res.data.msg || '创建浏览器授权会话失败', 'warning');
+                    closeManualLoginModal();
+                    return;
+                }
+                manualLoginSession = res.data.session_id;
+                showToast(res.data.msg, 'info');
+                if (manualLoginTimer) clearInterval(manualLoginTimer);
+                manualLoginTimer = setInterval(pollManualLogin, 1000);
+                pollManualLogin();
+            } catch (e) {
+                showToast('创建浏览器授权会话失败', 'error');
+            }
+        }
+
+        async function pollManualLogin() {
+            if (!manualLoginSession) return;
+            try {
+                const res = await axios.get('/api/manual_login/status/' + manualLoginSession);
+                document.getElementById('manual-login-status').textContent = res.data.msg || '等待中...';
+                if (res.data.screenshot) {
+                    document.getElementById('manual-login-screen').src = res.data.screenshot + '?t=' + Date.now();
+                }
+                if (res.data.status === 'success') {
+                    clearInterval(manualLoginTimer);
+                    showToast('浏览器登录态已保存', 'success');
+                    document.getElementById('d_password').value = '';
+                    fetchSystemStats();
+                    manualLoginSession = null;
+                    setTimeout(closeManualLoginModal, 1200);
+                } else if (res.data.status === 'expired') {
+                    clearInterval(manualLoginTimer);
+                    showToast('登录会话已过期，请重新发起', 'warning');
+                    manualLoginSession = null;
+                } else if (res.data.status === 'cancelled') {
+                    clearInterval(manualLoginTimer);
+                    manualLoginSession = null;
+                }
+            } catch (e) {}
+        }
+
+        async function sendManualControl(payload) {
+            if (!manualLoginSession) { showToast('没有活动登录会话', 'warning'); return; }
+            await axios.post('/api/manual_login/control', { session_id: manualLoginSession, ...payload });
+        }
+
+        function sendManualClick(event) {
+            const img = event.currentTarget;
+            const rect = img.getBoundingClientRect();
+            const x = Math.round((event.clientX - rect.left) * 1280 / rect.width);
+            const y = Math.round((event.clientY - rect.top) * 720 / rect.height);
+            sendManualControl({ type: 'click', x, y });
+        }
+
+        function sendManualText() {
+            const input = document.getElementById('manual-login-text');
+            const text = input.value;
+            if (!text) return;
+            sendManualControl({ type: 'type', text });
+            input.value = '';
+        }
+
+        function sendManualKey(key) {
+            sendManualControl({ type: 'press', key });
+        }
+
+        function sendManualGotoLogin() {
+            sendManualControl({ type: 'goto', url: 'https://www.epicgames.com/id/login?lang=en-US&noHostRedirect=true&redirectUrl=https://store.epicgames.com/en-US/free-games' });
+        }
+
+        async function closeManualLoginModal() {
+            const sessionToCancel = manualLoginSession;
+            document.getElementById('manual-login-modal').classList.add('hidden');
+            if (manualLoginTimer) clearInterval(manualLoginTimer);
+            manualLoginTimer = null;
+            manualLoginSession = null;
+            if (sessionToCancel) {
+                try {
+                    await axios.post('/api/manual_login/cancel', { session_id: sessionToCancel, type: 'cancel' });
+                } catch (e) {}
+            }
+        }
+
+        async function checkLoginState() {
+            const email = document.getElementById('d_email').value;
+            if (!email) { showToast('请输入邮箱', 'warning'); return; }
+            try {
+                const res = await axios.post('/api/check_login_state', { email });
+                showToast(res.data.msg, res.data.status === 'queued' ? 'info' : 'warning');
+                document.getElementById('work-area-container').classList.add('is-working');
+                document.getElementById('status-panel-wrapper').classList.add('is-visible');
+                document.getElementById('status-log').innerText = `> ${res.data.msg}`;
+                if (pollTimer) clearInterval(pollTimer);
+                pollTimer = setInterval(() => checkStatus(email, ''), 1500);
+            } catch (e) { showToast('登录态检测失败', 'error'); }
         }
 
         async function checkStatus(email, password) {
@@ -878,8 +1028,18 @@
                 // 验证成功或已在库中
                 else if (result === 'success' || result === 'success_owned') {
                     clearInterval(pollTimer);
-                    await axios.post('/api/confirm_success', { email, password });
+                    if (password) await axios.post('/api/confirm_success', { email, password });
                     showToast('任务完成！', 'success');
+                    resetUI(); fetchSystemStats();
+                }
+                else if (result === 'login_valid') {
+                    clearInterval(pollTimer);
+                    showToast('登录态有效', 'success');
+                    resetUI(); fetchSystemStats();
+                }
+                else if (result === 'login_expired') {
+                    clearInterval(pollTimer);
+                    showToast('登录态已过期，请重新浏览器授权', 'warning');
                     resetUI(); fetchSystemStats();
                 }
                 // ============================================================
