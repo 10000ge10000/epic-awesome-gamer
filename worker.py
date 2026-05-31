@@ -35,6 +35,15 @@ WARP_MAX_RETRIES = 5  # 最大重启次数
 EPIC_TEST_URL = "https://store.epicgames.com/en-US/"
 EPIC_TEST_TIMEOUT = 10  # 秒
 
+# ============================================================
+# 验证码失败恢复策略
+# ============================================================
+RETRY_QUEUE = "task_retry_queue"
+CAPTCHA_FAILURE_MAX_RETRIES = int(os.getenv("CAPTCHA_FAILURE_MAX_RETRIES", "2"))
+CAPTCHA_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("CAPTCHA_FAILURE_RETRY_DELAY_SECONDS", "900"))
+WARP_RESTART_COOLDOWN_SECONDS = int(os.getenv("WARP_RESTART_COOLDOWN_SECONDS", "300"))
+TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "5"))
+
 
 def check_warp_proxy() -> tuple[bool, str]:
     """
@@ -155,7 +164,76 @@ def ensure_warp_ready() -> bool:
     return False
 
 
-print("👷 Worker V27 (WARP Check) 启动！")
+def restart_warp_for_captcha_retry(email: str) -> bool:
+    """验证码失败后按冷却时间重启 WARP，避免连续抖动代理。"""
+    if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
+        print(f"ℹ️ [{email}] 未配置 WARP 代理，跳过验证码失败换 IP")
+        return False
+
+    now = time.time()
+    last_restart = r.get("warp:last_restart_at")
+    if last_restart:
+        try:
+            elapsed = now - float(last_restart)
+            if elapsed < WARP_RESTART_COOLDOWN_SECONDS:
+                wait_left = int(WARP_RESTART_COOLDOWN_SECONDS - elapsed)
+                print(f"⏳ [{email}] WARP 刚重启过，冷却剩余 {wait_left}s，跳过本次重启")
+                return False
+        except ValueError:
+            pass
+
+    print(f"🔄 [{email}] 验证码失败，重启 WARP 换 IP")
+    ok = restart_warp_container()
+    if ok:
+        r.set("warp:last_restart_at", str(time.time()), ex=max(WARP_RESTART_COOLDOWN_SECONDS * 2, 3600))
+        ensure_warp_ready()
+    return ok
+
+
+def schedule_captcha_retry(task_data: dict) -> bool:
+    """把验证码失败任务放入 Redis 延迟队列，限制重试次数和节奏。"""
+    email = task_data.get("email", "")
+    retry_count = int(task_data.get("captcha_retry_count", 0))
+
+    if retry_count >= CAPTCHA_FAILURE_MAX_RETRIES:
+        print(f"🛑 [{email}] 验证码失败重试已达上限: {retry_count}/{CAPTCHA_FAILURE_MAX_RETRIES}")
+        r.set(f"status:{email}", "❌ 验证码失败，已达重试上限", ex=3600)
+        r.set(f"result:{email}", "fail", ex=3600)
+        r.set(f"hint:{email}", "验证码多次失败，请稍后手动重试或检查账号风控", ex=3600)
+        return False
+
+    restart_warp_for_captcha_retry(email)
+
+    next_task = dict(task_data)
+    next_task["captcha_retry_count"] = retry_count + 1
+    run_at = int(time.time() + CAPTCHA_FAILURE_RETRY_DELAY_SECONDS)
+    payload = json.dumps(next_task, ensure_ascii=False)
+    r.zadd(RETRY_QUEUE, {payload: run_at})
+    r.set(f"status:{email}", f"⏳ 验证码失败，已换 IP，{CAPTCHA_FAILURE_RETRY_DELAY_SECONDS // 60} 分钟后重试 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]", ex=3600)
+    r.set(f"result:{email}", "retry_scheduled", ex=3600)
+    r.set(f"hint:{email}", "系统已自动更换 WARP 出口并安排延迟重试", ex=3600)
+    print(f"⏳ [{email}] 已安排验证码失败延迟重试: {CAPTCHA_FAILURE_RETRY_DELAY_SECONDS}s 后执行 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]")
+    return True
+
+
+def move_due_retry_tasks(limit: int = 10) -> int:
+    """把到期的延迟任务移动到主队列。"""
+    now = int(time.time())
+    due_tasks = r.zrangebyscore(RETRY_QUEUE, 0, now, start=0, num=limit)
+    moved = 0
+    for payload in due_tasks:
+        if r.zrem(RETRY_QUEUE, payload):
+            r.rpush("task_queue", payload)
+            moved += 1
+            try:
+                task_data = json.loads(payload)
+                print(f"🚦 [延迟重试] 任务已重新入队: {task_data.get('email')}")
+            except Exception:
+                print("🚦 [延迟重试] 任务已重新入队")
+    return moved
+
+
+print("👷 Worker V28 (WARP Retry Guard) 启动！")
 
 def clean_filename(title):
     return re.sub(r'[\\/*?:"<>|]', "", title).replace(" ", "_").lower()
@@ -669,6 +747,10 @@ def run_task(task_data):
         # 正常结束，执行常规瘦身
         clean_user_profile(email)
 
+        if final_error_type == "captcha_failed" and not is_fatal_failure:
+            schedule_captcha_retry(task_data)
+            return
+
         if mode == 'verify':
             if is_login_success and not is_fatal_failure and not has_critical_error:
                 r.set(f"result:{email}", "success", ex=3600)
@@ -686,12 +768,16 @@ def run_task(task_data):
 
 def main_loop():
     while True:
+        move_due_retry_tasks()
         task = r.blpop("task_queue", timeout=10)
         if task:
             _, data_json = task
             try: run_task(json.loads(data_json))
             except: pass
-        time.sleep(0.1)
+            if TASK_SPACING_SECONDS > 0:
+                time.sleep(TASK_SPACING_SECONDS)
+        else:
+            time.sleep(0.1)
 
 if __name__ == "__main__":
     main_loop()

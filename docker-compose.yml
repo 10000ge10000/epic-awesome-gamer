@@ -34,8 +34,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "1m"
+        max-file: "1"
 
   # ============================================================
   # Web: 前端服务（FastAPI）
@@ -64,8 +64,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "1m"
+        max-file: "1"
 
   # ============================================================
   # WARP 代理：提供 Cloudflare 网络出口
@@ -95,8 +95,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "5m"
-        max-file: "2"
+        max-size: "1m"
+        max-file: "1"
 
   # ============================================================
   # Worker: 后台任务执行器（浏览器自动化）
@@ -149,9 +149,14 @@ services:
       # 模型配置（SiliconFlow 实测通过）
       - CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
       - CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
-      - PRIMARY_MODEL=deepseek-ai/DeepSeek-V3.2
-      - PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Flash
+      - PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
+      - PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
       - RESPONSE_TIMEOUT=120
+      # 验证码失败后的自动恢复策略
+      - CAPTCHA_FAILURE_MAX_RETRIES=2
+      - CAPTCHA_FAILURE_RETRY_DELAY_SECONDS=900
+      - WARP_RESTART_COOLDOWN_SECONDS=300
+      - TASK_SPACING_SECONDS=5
     depends_on:
       redis:
         condition: service_healthy
@@ -161,5 +166,5 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "1m"
+        max-file: "1"

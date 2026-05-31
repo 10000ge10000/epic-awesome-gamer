@@ -10,6 +10,7 @@
 文件日志策略：
 - 按日期分类存储，方便查找和清理
 - 文件名格式：runtime-2026-03-22.log / error-2026-03-22.log
+- 单个日志文件最大 1 MB，超过后自动轮转
 - 保留 7 天
 """
 from __future__ import annotations
@@ -138,7 +139,7 @@ def init_log(**sink_channel):
         logger.add(
             sink=str(error_log_file),
             level="ERROR",
-            rotation="00:00",  # 每天午夜轮转
+            rotation="1 MB",
             filter=timezone_filter,
             retention="7 days",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
@@ -158,7 +159,7 @@ def init_log(**sink_channel):
         logger.add(
             sink=str(runtime_log_file),
             level="DEBUG",
-            rotation="00:00",  # 每天午夜轮转
+            rotation="1 MB",
             filter=timezone_filter,
             retention="7 days",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",

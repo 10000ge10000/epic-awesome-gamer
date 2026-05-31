@@ -74,11 +74,11 @@ class EpicSettings(AgentConfig):
 
     # === 主力模型（一般文本任务）===
     PRIMARY_MODEL: str = Field(
-        default=os.getenv("PRIMARY_MODEL", "deepseek-ai/DeepSeek-V3.2"),
+        default=os.getenv("PRIMARY_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
         description="主力文本模型",
     )
     PRIMARY_MODEL_FALLBACK: str = Field(
-        default=os.getenv("PRIMARY_MODEL_FALLBACK", "deepseek-ai/DeepSeek-V4-Flash"),
+        default=os.getenv("PRIMARY_MODEL_FALLBACK", "deepseek-ai/DeepSeek-V4-Pro"),
         description="主力文本模型（备用）",
     )
 
