@@ -128,7 +128,7 @@ docker compose up -d --build
 
 | 类型 | 主模型 | 备用模型 | 用途 |
 |------|--------|----------|------|
-| 主力文本 | `deepseek-ai/DeepSeek-V3.2` | `deepseek-ai/DeepSeek-V4-Flash` | 页面判断、流程决策、结构化文本输出 |
+| 主力文本 | `deepseek-ai/DeepSeek-V4-Flash` | `deepseek-ai/DeepSeek-V4-Pro` | 页面判断、流程决策、结构化文本输出 |
 | 验证码视觉 | `Qwen/Qwen3-VL-32B-Instruct` | `Qwen/Qwen3-VL-30B-A3B-Instruct` | hCaptcha 图像识别 |
 
 相关环境变量：
@@ -136,8 +136,8 @@ docker compose up -d --build
 ```env
 API_PROVIDER=siliconflow
 API_BASE_URL=https://api.siliconflow.cn/v1
-PRIMARY_MODEL=deepseek-ai/DeepSeek-V3.2
-PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Flash
+PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
+PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
 CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
 CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
 ```
@@ -147,6 +147,8 @@ CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
 - 验证码连续调用超过阈值后自动切换备用视觉模型。
 - API 调用异常时自动使用对应备用模型重试一次。
 - 视觉请求和文本请求会按是否包含图片自动选择不同模型。
+- 验证码失败会触发 WARP 换 IP，并将账号放入延迟队列，默认 15 分钟后重试，最多 2 次。
+- Docker 容器日志和应用文件日志均按 1 MB 自动轮转，避免长期运行撑满磁盘。
 
 ### 费用与额度
 

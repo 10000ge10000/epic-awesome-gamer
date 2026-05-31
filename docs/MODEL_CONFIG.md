@@ -70,27 +70,27 @@ Qwen2.5-VL-32B-Instruct 调用失败
 
 | 模型名称 | 类型 | 价格 | 适用场景 |
 |---------|------|------|---------|
-| Qwen2.5-7B-Instruct | 文本 | **免费** | 文本任务 |
-| Qwen2.5-72B-Instruct | 文本 | ¥2/百万tokens | 备用 |
-| Qwen2.5-VL-32B-Instruct | 视觉 | ¥0.5/百万tokens | 验证码识别 |
-| Qwen2.5-VL-72B-Instruct | 视觉 | ¥4/百万tokens | 备用 |
+| deepseek-ai/DeepSeek-V4-Flash | 文本 | 以 SiliconFlow 控制台为准 | 主力文本模型，实测速度优先 |
+| deepseek-ai/DeepSeek-V4-Pro | 文本 | 以 SiliconFlow 控制台为准 | 备用文本模型，质量兜底 |
+| Qwen/Qwen3-VL-32B-Instruct | 视觉 | 以 SiliconFlow 控制台为准 | 验证码识别主模型 |
+| Qwen/Qwen3-VL-30B-A3B-Instruct | 视觉 | 以 SiliconFlow 控制台为准 | 验证码识别备用模型 |
 
 ---
 
 ## 🔧 配置位置
 
-### 模型配置（已写死）
+### 模型配置
 
-所有模型配置硬编码在 `app/settings.py` 中：
+默认模型配置在 `app/settings.py` 中，也可以通过 `.env` 或 `docker-compose.yml` 环境变量覆盖：
 
 ```python
 # 主力模型配置
-PRIMARY_MODEL: str = Field(default="Qwen/Qwen2.5-7B-Instruct")
-PRIMARY_MODEL_FALLBACK: str = Field(default="Qwen/Qwen2.5-72B-Instruct")
+PRIMARY_MODEL: str = Field(default="deepseek-ai/DeepSeek-V4-Flash")
+PRIMARY_MODEL_FALLBACK: str = Field(default="deepseek-ai/DeepSeek-V4-Pro")
 
 # 验证码模型配置
-CAPTCHA_MODEL: str = Field(default="Qwen/Qwen2.5-VL-32B-Instruct")
-CAPTCHA_MODEL_FALLBACK: str = Field(default="Qwen/Qwen2.5-VL-72B-Instruct")
+CAPTCHA_MODEL: str = Field(default="Qwen/Qwen3-VL-32B-Instruct")
+CAPTCHA_MODEL_FALLBACK: str = Field(default="Qwen/Qwen3-VL-30B-A3B-Instruct")
 ```
 
 **注意**: 这些配置已经过优化测试，建议不要修改。
@@ -106,7 +106,6 @@ environment:
 
 **重要说明**：
 - ✅ 仅支持 [SiliconFlow](https://cloud.siliconflow.cn/i/OVI2n57p) 的 API Key
-- 🆓 SiliconFlow 免费提供 Qwen2.5-7B-Instruct 模型
 - 🎁 使用邀请链接注册可获 ¥16 代金券
 
 ---
@@ -115,8 +114,8 @@ environment:
 
 | 项目 | 价格 | 说明 |
 |------|------|------|
-| 主力模型 | **免费** | Qwen2.5-7B-Instruct |
-| 验证码模型 | ¥0.5/百万tokens | Qwen2.5-VL-32B-Instruct |
+| 主力模型 | 以控制台为准 | deepseek-ai/DeepSeek-V4-Flash |
+| 验证码模型 | 以控制台为准 | Qwen/Qwen3-VL-32B-Instruct |
 | ¥16 代金券 | ≈ **1500+ 次任务** | 每次任务约 ¥0.01 |
 
 ---
