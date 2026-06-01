@@ -96,7 +96,8 @@ docker compose up -d --build
 2. 默认 AI 提供商是 SiliconFlow，接口地址为 `https://api.siliconflow.cn/v1`。
 3. `API_KEY` 必须放在 `.env`，`.env` 已被 `.gitignore` 忽略。
 4. 旧版 `API_KEY` / `API_BASE_URL` 仍可兼容读取，但新部署不要再使用旧变量名。
-5. WARP 容器负责访问 Epic Games；如果 Epic 风控严重，可能需要更稳定的住宅代理或更换出口。
+5. 默认 `USE_WARP=true`，WARP 容器负责访问 Epic Games；如果要使用服务器自身 IP，设置 `USE_WARP=false` 后执行 `docker compose up -d --build`。
+6. 如果 Epic 风控严重，可能需要更稳定的住宅代理或更换出口。
 
 ---
 
@@ -136,10 +137,31 @@ docker compose up -d --build
 ```env
 API_PROVIDER=siliconflow
 API_BASE_URL=https://api.siliconflow.cn/v1
+USE_WARP=true
 PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
 PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
 CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
 CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+```
+
+### WARP 代理配置
+
+项目默认通过 WARP 代理访问 Epic Games，保持原部署行为不变：
+
+```env
+USE_WARP=true
+```
+
+如需关闭 WARP 并使用服务器自身 IP 直连，在 `.env` 中设置：
+
+```env
+USE_WARP=false
+```
+
+修改后重新构建并启动：
+
+```bash
+docker compose up -d --build
 ```
 
 智能切换机制：
@@ -147,7 +169,8 @@ CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
 - 验证码连续调用超过阈值后自动切换备用视觉模型。
 - API 调用异常时自动使用对应备用模型重试一次。
 - 视觉请求和文本请求会按是否包含图片自动选择不同模型。
-- 验证码失败会触发 WARP 换 IP，并将账号放入延迟队列，默认 15 分钟后重试，最多 2 次。
+- `USE_WARP=true` 时，验证码失败会触发 WARP 换 IP，并将账号放入延迟队列，默认 15 分钟后重试，最多 2 次。
+- `USE_WARP=false` 时，验证码失败只会进入延迟重试，不会重启 WARP。
 - Docker 容器日志和应用文件日志均按 1 MB 自动轮转，避免长期运行撑满磁盘。
 
 ### 费用与额度

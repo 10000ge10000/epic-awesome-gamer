@@ -122,6 +122,8 @@ services:
       - ENABLE_APSCHEDULER=false
       - API_PROVIDER=siliconflow
       - API_BASE_URL=https://api.siliconflow.cn/v1
+      # WARP 开关：默认启用；设置 USE_WARP=false 时使用自身 IP
+      - USE_WARP=${USE_WARP:-true}
       # WARP HTTP 代理（容器内部网络）
       - HTTP_PROXY=http://epic-warp:19000
       - HTTPS_PROXY=http://epic-warp:19000

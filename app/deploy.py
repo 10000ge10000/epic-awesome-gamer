@@ -42,6 +42,25 @@ init_log(
 TIMEZONE = timezone("Asia/Shanghai")
 
 
+def env_flag_enabled(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def clear_proxy_env() -> None:
+    for proxy_env in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        os.environ.pop(proxy_env, None)
+
+
 @logger.catch
 async def execute_browser_tasks(headless: bool = True) -> ErrorType:
     """
@@ -63,8 +82,13 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
     # 格式: HTTP_PROXY=http://host:port
     # ============================================================
     proxy_config = None
+    use_warp = env_flag_enabled("USE_WARP", True)
+    if not use_warp:
+        clear_proxy_env()
+        logger.info("🌐 USE_WARP=false，浏览器将使用自身 IP 直连")
+
     http_proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
-    if http_proxy:
+    if use_warp and http_proxy:
         from urllib.parse import urlparse
         parsed = urlparse(http_proxy)
         proxy_config = {

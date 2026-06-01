@@ -10,6 +10,27 @@ import glob
 import socket
 from bs4 import BeautifulSoup
 
+
+def env_flag_enabled(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+USE_WARP = env_flag_enabled("USE_WARP", True)
+
+if not USE_WARP:
+    for proxy_env in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        os.environ.pop(proxy_env, None)
+
 # Redis
 redis_host = os.getenv("REDIS_HOST", "localhost")
 r = redis.Redis(host=redis_host, port=6379, decode_responses=True)
@@ -137,6 +158,10 @@ def ensure_warp_ready() -> bool:
     Returns:
         bool: WARP 是否可用
     """
+    if not USE_WARP:
+        print("ℹ️ USE_WARP=false，跳过 WARP 检测，使用自身 IP")
+        return True
+
     # 如果没有配置 WARP 代理，直接返回成功（不使用代理）
     if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
         print("ℹ️ 未配置 WARP 代理，跳过检测")
@@ -166,6 +191,10 @@ def ensure_warp_ready() -> bool:
 
 def restart_warp_for_captcha_retry(email: str) -> bool:
     """验证码失败后按冷却时间重启 WARP，避免连续抖动代理。"""
+    if not USE_WARP:
+        print(f"ℹ️ [{email}] USE_WARP=false，跳过验证码失败换 IP")
+        return False
+
     if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
         print(f"ℹ️ [{email}] 未配置 WARP 代理，跳过验证码失败换 IP")
         return False
@@ -202,16 +231,18 @@ def schedule_captcha_retry(task_data: dict) -> bool:
         r.set(f"hint:{email}", "验证码多次失败，请稍后手动重试或检查账号风控", ex=3600)
         return False
 
-    restart_warp_for_captcha_retry(email)
+    warp_restarted = restart_warp_for_captcha_retry(email)
 
     next_task = dict(task_data)
     next_task["captcha_retry_count"] = retry_count + 1
     run_at = int(time.time() + CAPTCHA_FAILURE_RETRY_DELAY_SECONDS)
     payload = json.dumps(next_task, ensure_ascii=False)
     r.zadd(RETRY_QUEUE, {payload: run_at})
-    r.set(f"status:{email}", f"⏳ 验证码失败，已换 IP，{CAPTCHA_FAILURE_RETRY_DELAY_SECONDS // 60} 分钟后重试 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]", ex=3600)
+    retry_action = "已换 IP" if warp_restarted else "将直接延迟重试"
+    r.set(f"status:{email}", f"⏳ 验证码失败，{retry_action}，{CAPTCHA_FAILURE_RETRY_DELAY_SECONDS // 60} 分钟后重试 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]", ex=3600)
     r.set(f"result:{email}", "retry_scheduled", ex=3600)
-    r.set(f"hint:{email}", "系统已自动更换 WARP 出口并安排延迟重试", ex=3600)
+    hint = "系统已自动更换 WARP 出口并安排延迟重试" if warp_restarted else "系统已安排延迟重试，当前未更换 WARP 出口"
+    r.set(f"hint:{email}", hint, ex=3600)
     print(f"⏳ [{email}] 已安排验证码失败延迟重试: {CAPTCHA_FAILURE_RETRY_DELAY_SECONDS}s 后执行 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]")
     return True
 
