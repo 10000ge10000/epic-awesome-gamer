@@ -556,15 +556,8 @@ def run_task(task_data):
     env["EPIC_EMAIL"] = email
     env["EPIC_PASSWORD"] = password
     env["ENABLE_APSCHEDULER"] = "false"
-    if task_data.get("session_id"):
-        env["MANUAL_LOGIN_SESSION_ID"] = task_data.get("session_id")
 
-    if mode == "manual_login":
-        cmd = ["python3", "app/manual_login.py"]
-    elif mode == "check_login":
-        cmd = ["python3", "app/check_login_state.py"]
-    else:
-        cmd = ["xvfb-run", "-a", "python3", "app/deploy.py"]
+    cmd = ["xvfb-run", "-a", "python3", "app/deploy.py"]
 
     is_login_success = False
     has_critical_error = False
@@ -597,42 +590,6 @@ def run_task(task_data):
 
             print(f"[{email}] {line}")
 
-            if mode == "manual_login":
-                if "MANUAL_LOGIN_SUCCESS" in line:
-                    no_proxy = {"http": None, "https": None}
-                    try:
-                        res = requests.post(
-                            f"{WEB_BASE_URL}/api/manual_login/complete",
-                            json={"email": email, "session_id": task_data.get("session_id")},
-                            timeout=5,
-                            proxies=no_proxy,
-                        )
-                        print(f"✅ 浏览器登录态保存结果: {res.status_code} - {res.text}")
-                    except Exception as e:
-                        print(f"❌ 浏览器登录态保存失败: {e}")
-                    return
-                if "MANUAL_LOGIN_EXPIRED" in line:
-                    r.set(f"status:{email}", "❌ 浏览器授权登录超时", ex=3600)
-                    r.set(f"result:{email}", "fail", ex=3600)
-                    return
-                if "MANUAL_LOGIN_CANCELLED" in line:
-                    r.set(f"status:{email}", "⚪ 浏览器授权登录已取消", ex=300)
-                    r.set(f"result:{email}", "fail", ex=300)
-                    return
-                continue
-
-            if mode == "check_login":
-                if "LOGIN_STATE_VALID" in line:
-                    r.set(f"status:{email}", "✅ 登录态有效", ex=3600)
-                    r.set(f"result:{email}", "login_valid", ex=3600)
-                    return
-                if "LOGIN_STATE_EXPIRED" in line:
-                    r.set(f"status:{email}", "⚠️ 登录态已过期，请重新浏览器授权", ex=3600)
-                    r.set(f"result:{email}", "login_expired", ex=3600)
-                    r.set(f"hint:{email}", "Epic 已要求重新登录，请使用浏览器授权登录刷新登录态", ex=3600)
-                    return
-                continue
-
             # ============================================================
             # 🔥 新增：解析错误类型（格式: ❌ ERROR_TYPE:xxx）
             # ============================================================
@@ -646,12 +603,6 @@ def run_task(task_data):
                     # 根据错误类型设置状态
                     if error_type in ERROR_TYPE_MESSAGES:
                         error_info = ERROR_TYPE_MESSAGES[error_type]
-                        if password == "__COOKIE_ONLY__" and error_type in ("invalid_credentials", "captcha_failed", "login_timeout", "unknown"):
-                            r.set(f"status:{email}", "⚠️ 登录态已过期，请重新浏览器授权", ex=3600)
-                            r.set(f"result:{email}", "login_expired", ex=3600)
-                            r.set(f"hint:{email}", "该账号未保存密码，Epic 要求重新登录，请使用浏览器授权刷新登录态", ex=3600)
-                            process.kill()
-                            return
                         r.set(f"status:{email}", error_info["status"], ex=3600)
 
                         # 设置错误提示，供前端弹窗使用
@@ -712,12 +663,6 @@ def run_task(task_data):
 
             # 🛑 致命错误 B: 密码错误（兼容旧日志格式）
             if "invalid_account_credentials" in line or "账号或密码错误" in line:
-                if password == "__COOKIE_ONLY__":
-                    r.set(f"status:{email}", "⚠️ 登录态已过期，请重新浏览器授权", ex=3600)
-                    r.set(f"result:{email}", "login_expired", ex=3600)
-                    r.set(f"hint:{email}", "该账号未保存密码，Epic 要求重新登录，请使用浏览器授权刷新登录态", ex=3600)
-                    process.kill()
-                    return
                 r.set(f"status:{email}", "❌ 密码错误", ex=300)
                 r.set(f"result:{email}", "fail", ex=3600)
                 process.kill()

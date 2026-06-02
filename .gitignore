@@ -20,8 +20,6 @@ data/epic_kiosk.db
 data/images/*.jpg
 data/images/*.png
 !data/images/.gitkeep
-data/manual_login/*.jpg
-data/manual_login/*.png
 data/logs/
 data/runtime/
 data/captcha_debug/
