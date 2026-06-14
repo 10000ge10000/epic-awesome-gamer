@@ -53,6 +53,9 @@ services:
     environment:
       - REDIS_HOST=redis
       - TZ=Asia/Shanghai
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 中配置 INTERNAL_API_TOKEN}
+      - TASK_LOCK_SECONDS=86400
+      - CONFIRM_TOKEN_SECONDS=86400
       # 历史数据偏移量配置（用于补偿丢失的记录，其他用户无需修改）
       - CLAIM_HISTORY_OFFSET=1132
       - ACCOUNT_VERIFIED_OFFSET=140
@@ -122,6 +125,9 @@ services:
       - ENABLE_APSCHEDULER=false
       - API_PROVIDER=siliconflow
       - API_BASE_URL=https://api.siliconflow.cn/v1
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 中配置 INTERNAL_API_TOKEN}
+      - TASK_TIMEOUT_SECONDS=900
+      - TASK_LOCK_SECONDS=86400
       # WARP HTTP 代理（容器内部网络）
       - HTTP_PROXY=http://epic-warp:19000
       - HTTPS_PROXY=http://epic-warp:19000
@@ -155,6 +161,8 @@ services:
       # 验证码失败后的自动恢复策略
       - CAPTCHA_FAILURE_MAX_RETRIES=2
       - CAPTCHA_FAILURE_RETRY_DELAY_SECONDS=900
+      - NETWORK_FAILURE_MAX_RETRIES=2
+      - NETWORK_FAILURE_RETRY_DELAY_SECONDS=600
       - WARP_RESTART_COOLDOWN_SECONDS=300
       - TASK_SPACING_SECONDS=5
     depends_on:

@@ -52,6 +52,12 @@ class GameCollectResult(Enum):
     # 失败：Cookie 无效
     COOKIE_INVALID = "cookie_invalid"
 
+    # 失败：领取阶段验证码未通过或无法确认
+    CAPTCHA_FAILED = "captcha_failed"
+
+    # 失败：验证码通过，但无法确认订单完成或商品入库
+    CHECKOUT_FAILED = "checkout_failed"
+
     # 失败：未知错误
     UNKNOWN_ERROR = "unknown_error"
 
@@ -343,6 +349,11 @@ class EpicAgent:
                 return GameCollectResult.SUCCESS
             except Exception as e:
                 logger.exception(e)
+                error_message = str(e).lower()
+                if "captcha" in error_message or "challenge" in error_message:
+                    return GameCollectResult.CAPTCHA_FAILED
+                if "未能确认领取成功" in str(e) or "checkout" in error_message:
+                    return GameCollectResult.CHECKOUT_FAILED
                 return GameCollectResult.UNKNOWN_ERROR
 
         logger.debug("All tasks in the workflow have been completed")
@@ -513,9 +524,32 @@ class EpicGames:
                 await accept.click()
                 return True
 
-    async def _handle_instant_checkout(self, page: Page):
+    @staticmethod
+    def _emit_game_result(title: str, status: str) -> None:
+        payload = json.dumps({"title": title, "status": status}, ensure_ascii=False)
+        logger.info(f"GAME_RESULT:{payload}")
+
+    @staticmethod
+    async def _product_is_owned(page: Page, product_url: str) -> bool:
+        """Verify ownership on the product page after checkout closes."""
+        try:
+            await page.goto(product_url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2000)
+            purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
+            if await purchase_btn.is_visible(timeout=3000):
+                text = (await purchase_btn.text_content(timeout=1000) or "").strip().upper()
+                return await purchase_btn.is_disabled(timeout=1000) or text in {
+                    "IN LIBRARY",
+                    "OWNED",
+                }
+        except Exception as err:
+            logger.warning(f"⚠️ 无法验证商品入库状态: {err}")
+        return False
+
+    async def _handle_instant_checkout(self, page: Page, product_url: str) -> bool:
         logger.info("🚀 开始即时结账流程...")
         agent = AgentV(page=page, agent_config=settings)
+        challenge_error: Exception | None = None
 
         try:
             await self._handle_device_not_supported_modal(page)
@@ -531,36 +565,56 @@ class EpicGames:
                 logger.debug("检查验证码...")
                 await agent.wait_for_challenge()
             except Exception as e:
-                logger.debug(f"验证码检测跳过: {e}")
+                challenge_error = e
+                logger.warning(f"⚠️ 验证码流程未确认成功: {e}")
 
             try:
                 if not await payment_btn.is_visible():
-                     logger.success("🎉 领取成功：支付按钮已消失")
-                     return
+                    logger.success("🎉 领取成功：支付按钮已消失")
+                    return True
             except Exception:
                 logger.success("🎉 领取成功：iframe 已关闭")
-                return
+                return True
 
             with suppress(Exception):
                 await payment_btn.click(force=True)
                 await page.wait_for_timeout(2000)
 
-            logger.success("🎉 游戏领取成功！")
+            if page.url.startswith(URL_CART_SUCCESS):
+                logger.success("🎉 领取成功：已进入结账成功页面")
+                return True
+
+            if await self._product_is_owned(page, product_url):
+                logger.success("🎉 领取成功：商品页已显示入库")
+                return True
 
         except Exception as err:
-            logger.warning(f"⚠️ 即时结账警告（游戏可能已领取）: {err}")
-            await page.reload()
+            logger.error(f"❌ 即时结账失败: {err}")
+            return False
 
-    async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> bool:
+        if challenge_error:
+            logger.error(f"❌ 即时结账无法确认，验证码异常: {challenge_error}")
+            raise RuntimeError(f"captcha checkout verification failed: {challenge_error}")
+
+        logger.error("❌ 即时结账无法确认成功")
+        return False
+
+    async def add_promotion_to_cart(
+        self, page: Page, promotions: List[PromotionGame]
+    ) -> tuple[bool, dict[str, str]]:
         has_pending_cart_items = False
+        outcomes: dict[str, str] = {}
 
-        for url in urls:
+        for promotion in promotions:
+            url = promotion.url
             await page.goto(url, wait_until="load")
 
             # 404 检测
-            title = await page.title()
-            if "404" in title or "Page Not Found" in title:
+            page_title = await page.title()
+            if "404" in page_title or "Page Not Found" in page_title:
                 logger.error(f"❌ Invalid URL (404 Page): {url}")
+                outcomes[promotion.title] = "failed"
+                self._emit_game_result(promotion.title, "failed")
                 continue
 
             # 处理年龄限制弹窗
@@ -583,12 +637,19 @@ class EpicGames:
                 if not await purchase_btn.is_visible(timeout=5000):
                     all_text = await page.locator("body").text_content()
                     if "In Library" in all_text or "Owned" in all_text:
-                         logger.success(f"✅ 游戏已在库中")
-                         continue
+                        logger.success("✅ 游戏已在库中")
+                        outcomes[promotion.title] = "owned"
+                        self._emit_game_result(promotion.title, "owned")
+                        continue
                     logger.warning(f"⚠️ 找不到购买按钮")
+                    outcomes[promotion.title] = "failed"
+                    self._emit_game_result(promotion.title, "failed")
                     continue
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning(f"⚠️ 检查购买按钮失败: {err}")
+                outcomes[promotion.title] = "failed"
+                self._emit_game_result(promotion.title, "failed")
+                continue
 
             # 3. 获取按钮信息
             btn_text = await purchase_btn.text_content()
@@ -603,16 +664,27 @@ class EpicGames:
             # 5. 根据状态判断
             if is_disabled:
                 logger.success(f"✅ 游戏已在库中")
+                outcomes[promotion.title] = "owned"
+                self._emit_game_result(promotion.title, "owned")
                 continue
 
-            if any(s in btn_text_upper for s in ["IN LIBRARY", "OWNED", "UNAVAILABLE", "COMING SOON"]):
+            if any(s in btn_text_upper for s in ["IN LIBRARY", "OWNED"]):
                 logger.success(f"✅ 游戏已在库中")
+                outcomes[promotion.title] = "owned"
+                self._emit_game_result(promotion.title, "owned")
+                continue
+
+            if any(s in btn_text_upper for s in ["UNAVAILABLE", "COMING SOON"]):
+                logger.warning(f"⚠️ 当前不可领取: {btn_text}")
+                outcomes[promotion.title] = "failed"
+                self._emit_game_result(promotion.title, "failed")
                 continue
 
             if "CART" in btn_text_upper:
                 logger.info(f"🛒 加入购物车")
                 await purchase_btn.click()
                 has_pending_cart_items = True
+                outcomes[promotion.title] = "cart"
                 continue
 
             # 6. 尝试领取
@@ -621,10 +693,22 @@ class EpicGames:
             await purchase_btn.click()
 
             # 点击后，转入即时结账流程
-            await self._handle_instant_checkout(page)
+            try:
+                checkout_success = await self._handle_instant_checkout(page, url)
+            except Exception:
+                outcomes[promotion.title] = "failed"
+                self._emit_game_result(promotion.title, "failed")
+                raise
+
+            if checkout_success:
+                outcomes[promotion.title] = "claimed"
+                self._emit_game_result(promotion.title, "claimed")
+            else:
+                outcomes[promotion.title] = "failed"
+                self._emit_game_result(promotion.title, "failed")
             # ------------------------------------------------------------
 
-        return has_pending_cart_items
+        return has_pending_cart_items, outcomes
 
     async def _empty_cart(self, page: Page, wait_rerender: int = 30) -> bool | None:
         has_paid_free = False
@@ -648,37 +732,60 @@ class EpicGames:
             logger.warning(f"清空购物车失败: {err}")
             return False
 
-    async def _purchase_free_game(self):
-        await self.page.goto(URL_CART, wait_until="domcontentloaded")
-        logger.debug("Move ALL paid games from the shopping cart out")
-        await self._empty_cart(self.page)
+    async def _purchase_free_game(self, max_attempts: int = 2) -> bool:
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            await self.page.goto(URL_CART, wait_until="domcontentloaded")
+            logger.debug("Move ALL paid games from the shopping cart out")
+            await self._empty_cart(self.page)
 
-        agent = AgentV(page=self.page, agent_config=settings)
-        await self.page.click("//button//span[text()='Check Out']")
-        await self._agree_license(self.page)
+            agent = AgentV(page=self.page, agent_config=settings)
+            try:
+                await self.page.click("//button//span[text()='Check Out']")
+                await self._agree_license(self.page)
+                logger.debug("Move to webPurchaseContainer iframe")
+                wpc, payment_btn = await self._active_purchase_container(self.page)
+                logger.debug("Click payment button")
+                await self._uk_confirm_order(wpc)
+                if await payment_btn.is_visible():
+                    await payment_btn.click(force=True)
+                await agent.wait_for_challenge()
+                await self.page.wait_for_url(f"{URL_CART_SUCCESS}**", timeout=30000)
+                return True
+            except Exception as err:
+                last_error = err
+                if self.page.url.startswith(URL_CART_SUCCESS):
+                    return True
+                logger.warning(f"⚠️ 购物车结账失败 [{attempt}/{max_attempts}]: {err}")
+                if attempt < max_attempts:
+                    await self.page.reload()
 
-        try:
-            logger.debug("Move to webPurchaseContainer iframe")
-            wpc, payment_btn = await self._active_purchase_container(self.page)
-            logger.debug("Click payment button")
-            await self._uk_confirm_order(wpc)
-            await agent.wait_for_challenge()
-        except Exception as err:
-            logger.warning(f"验证码解决失败: {err}")
-            await self.page.reload()
-            return await self._purchase_free_game()
+        if last_error and (
+            "captcha" in str(last_error).lower() or "challenge" in str(last_error).lower()
+        ):
+            raise RuntimeError(f"captcha cart checkout failed: {last_error}")
+        return False
 
     @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
     async def collect_weekly_games(self, promotions: List[PromotionGame]):
-        urls = [p.url for p in promotions]
-        has_cart_items = await self.add_promotion_to_cart(self.page, urls)
+        has_cart_items, outcomes = await self.add_promotion_to_cart(self.page, promotions)
 
         if has_cart_items:
-            await self._purchase_free_game()
-            try:
-                await self.page.wait_for_url(URL_CART_SUCCESS)
+            cart_success = await self._purchase_free_game()
+            cart_promotions = [p for p in promotions if outcomes.get(p.title) == "cart"]
+            if cart_success:
+                for promotion in cart_promotions:
+                    outcomes[promotion.title] = "claimed"
+                    self._emit_game_result(promotion.title, "claimed")
                 logger.success("🎉 购物车游戏领取成功")
-            except TimeoutError:
-                logger.warning("购物车游戏领取失败")
-        else:
-            logger.success("🎉 任务完成（已领取或已在库中）")
+            else:
+                for promotion in cart_promotions:
+                    outcomes[promotion.title] = "failed"
+                    self._emit_game_result(promotion.title, "failed")
+                logger.error("❌ 购物车游戏领取失败")
+
+        failed = [title for title, status in outcomes.items() if status == "failed"]
+        if failed:
+            raise RuntimeError(f"以下游戏未能确认领取成功: {', '.join(failed)}")
+
+        logger.success("🎉 任务完成（已领取或已在库中）")

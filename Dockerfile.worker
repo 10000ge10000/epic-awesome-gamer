@@ -1,14 +1,15 @@
 FROM python:3.12-slim
 
+ARG DOCKER_CLI_VERSION=5:29.5.3-1~debian.13~trixie
+
 WORKDIR /app
 
 # 预创建挂载点目录（解决 Docker 存储驱动挂载权限问题）
 RUN mkdir -p /app/data /app/app/volumes
 
-# 安装系统依赖（包含 docker 客户端）
+# 安装系统依赖和固定版本的 Docker CLI。
+# Worker 只通过宿主机 socket 重启 WARP，不需要 dockerd/containerd/buildx。
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -31,7 +32,13 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     xvfb \
     curl \
-    && curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh && rm get-docker.sh \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && . /etc/os-release \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli="${DOCKER_CLI_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 uv

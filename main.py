@@ -6,8 +6,10 @@ import shutil
 import random
 import httpx
 import re
+import secrets
+import hashlib
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,12 +20,15 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 # 1. 挂载与路径
-IMAGES_DIR = "/app/data/images"
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+IMAGES_DIR = os.path.join(DATA_DIR, "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
-DATA_DIR = "/app/data"
 DB_PATH = os.path.join(DATA_DIR, "kiosk.db")
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "86400"))
+CONFIRM_TOKEN_SECONDS = int(os.getenv("CONFIRM_TOKEN_SECONDS", "86400"))
 
 # 历史数据偏移量配置（通过环境变量设置，默认为 0）
 # 用于补偿因入库 API 失效丢失的历史记录
@@ -55,6 +60,9 @@ class Account(BaseModel):
     email: str
     password: str
 
+class ConfirmAccount(Account):
+    confirmation_token: str
+
 class NukeRequest(BaseModel):
     email: str
 
@@ -66,9 +74,42 @@ class GameLog(BaseModel):
     game_title: str
     image_filename: str
 
+
+def _require_internal_token(authorization: str | None) -> None:
+    """Worker-only APIs fail closed unless a shared token is configured."""
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="Internal API token is not configured")
+    expected = f"Bearer {INTERNAL_API_TOKEN}"
+    if not authorization or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _enqueue_task(task: dict, confirmation_token: str | None = None) -> bool:
+    """Atomically deduplicate queued/running work for one account."""
+    email = task["email"]
+    lock_key = f"task_lock:{email}"
+    if not r.set(lock_key, "queued", nx=True, ex=TASK_LOCK_SECONDS):
+        return False
+    try:
+        r.delete(f"status:{email}", f"result:{email}", f"hint:{email}")
+        if confirmation_token:
+            r.setex(f"confirm_token:{email}", CONFIRM_TOKEN_SECONDS, confirmation_token)
+        r.rpush("task_queue", json.dumps(task, ensure_ascii=False))
+        return True
+    except Exception:
+        r.delete(lock_key)
+        if confirmation_token:
+            r.delete(f"confirm_token:{email}")
+        raise
+
 # --- 🛡️ 防滥用中间件 (多层防护) ---
 @app.middleware("http")
 async def anti_abuse_middleware(request: Request, call_next):
+    path = request.url.path.lower()
+    sensitive_prefixes = ("/.env", "/.git", "/data", "/app/volumes")
+    if any(path == prefix or path.startswith(f"{prefix}/") for prefix in sensitive_prefixes):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
     # 仅针对"提交任务/启动引擎"接口进行限制
     if request.url.path == "/api/deposit" and request.method == "POST":
         client_ip = request.client.host
@@ -135,6 +176,9 @@ def _perform_physical_delete(email):
     r.delete(f"result:{email}")
     r.delete(f"last_game:{email}")
     r.delete(f"pending_game:{email}")
+    r.delete(f"task_lock:{email}")
+    r.delete(f"retry_pending:{email}")
+    r.delete(f"confirm_token:{email}")
     
     return "，".join(log_msgs)
 
@@ -160,8 +204,7 @@ async def deposit(account: Account, request: Request):
     client_ip = request.client.host
 
     # 1. 检查是否正在处理中
-    current_status = r.get(f"status:{email}")
-    if current_status and not current_status.startswith("🎉") and not current_status.startswith("❌"):
+    if r.exists(f"task_lock:{email}"):
         return {"status": "busy", "msg": "⏳ 该账号有任务正在执行中，请稍后再试"}
 
     # 2. 如果是已存储账号，验证密码
@@ -190,10 +233,14 @@ async def deposit(account: Account, request: Request):
 
     # 3. 提交任务
     task = {"email": email, "password": password, "mode": "verify"}
-    r.delete(f"status:{email}")
-    r.delete(f"result:{email}")
-    r.rpush("task_queue", json.dumps(task))
-    return {"status": "queued", "msg": "✅ 任务已加入队列"}
+    confirmation_token = secrets.token_urlsafe(32)
+    if not _enqueue_task(task, confirmation_token=confirmation_token):
+        return {"status": "busy", "msg": "⏳ 该账号有任务正在执行中，请稍后再试"}
+    return {
+        "status": "queued",
+        "msg": "✅ 任务已加入队列",
+        "confirmation_token": confirmation_token,
+    }
 
 @app.post("/api/delete_account")
 async def delete_account(account: Account):
@@ -212,7 +259,8 @@ async def delete_account(account: Account):
 
 # Worker 专用的核弹接口（无需密码，直接销毁）
 @app.post("/api/nuke_account")
-async def nuke_account(req: NukeRequest):
+async def nuke_account(req: NukeRequest, authorization: str | None = Header(default=None)):
+    _require_internal_token(authorization)
     print(f"☢️ 接到 Worker 指令，正在销毁无效账号: {req.email}")
     msg = _perform_physical_delete(req.email)
     return {"status": "success", "msg": msg}
@@ -227,12 +275,18 @@ async def get_status(email: str):
     return {"status": "processing", "msg": status_msg, "result": result, "game_title": last_game, "hint": hint}
 
 @app.post("/api/confirm_success")
-async def save_account(account: Account):
+async def save_account(account: ConfirmAccount):
+    token_key = f"confirm_token:{account.email}"
+    expected_token = r.get(token_key)
+    if not expected_token or not secrets.compare_digest(expected_token, account.confirmation_token):
+        raise HTTPException(status_code=401, detail="Invalid or expired confirmation token")
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO accounts (email, password) VALUES (?, ?)", (account.email, account.password))
     conn.commit()
     conn.close()
+    r.delete(token_key)
     return {"status": "saved"}
 
 @app.post("/api/query")
@@ -246,7 +300,8 @@ async def query_logs(account: QueryAccount):
     return {"status": "success", "data": logs}
 
 @app.post("/api/report_game")
-async def report_game(log: GameLog):
+async def report_game(log: GameLog, authorization: str | None = Header(default=None)):
+    _require_internal_token(authorization)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT id FROM logs WHERE email=? AND game_title=?", (log.email, log.game_title))
@@ -266,8 +321,10 @@ async def report_game(log: GameLog):
 def push_task_to_redis(task_json):
     """这才是真正把任务推进队列的函数，由调度器触发"""
     task_data = json.loads(task_json)
-    r.rpush("task_queue", task_json)
-    print(f"🚦 [错峰执行] 任务已入队: {task_data['email']}")
+    if _enqueue_task(task_data):
+        print(f"🚦 [错峰执行] 任务已入队: {task_data['email']}")
+    else:
+        print(f"⏭️ [错峰执行] 跳过重复任务: {task_data['email']}")
 
 def daily_job():
     print("⏰ 12点已到，正在为所有账号计算随机延迟...")
@@ -286,7 +343,15 @@ def daily_job():
         run_date = datetime.now() + timedelta(seconds=jitter_seconds)
         
         # 使用 APScheduler 的 'date' 触发器，在指定时间执行一次
-        scheduler.add_job(push_task_to_redis, 'date', run_date=run_date, args=[task_json])
+        job_hash = hashlib.sha256(email.encode("utf-8")).hexdigest()[:16]
+        scheduler.add_job(
+            push_task_to_redis,
+            'date',
+            id=f"daily-{datetime.now():%Y%m%d}-{job_hash}",
+            run_date=run_date,
+            args=[task_json],
+            replace_existing=True,
+        )
         
         print(f"📅 账号 {email} 将延迟 {jitter_seconds/60:.1f} 分钟，于 {run_date.strftime('%H:%M:%S')} 执行")
 

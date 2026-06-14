@@ -45,6 +45,7 @@ CONSOLE_KEYWORDS = [
     "任务完成",
     "按钮状态",
     "发现:",
+    "GAME_RESULT:",
     # 错误
     "错误",
     "失败",

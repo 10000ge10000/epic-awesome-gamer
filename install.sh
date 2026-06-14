@@ -297,6 +297,25 @@ API_KEY=%s
             printf "API_BASE_URL=https://api.siliconflow.cn/v1
 " >> .env
         fi
+
+        if ! grep -qE "^INTERNAL_API_TOKEN=.{32,}$" .env ||
+           grep -qE "^INTERNAL_API_TOKEN=replace-" .env; then
+            if command -v openssl &> /dev/null; then
+                internal_token=$(openssl rand -hex 32)
+            else
+                internal_token=$(head -c 48 /dev/urandom | base64 | tr -d '\n')
+            fi
+            if grep -qE "^INTERNAL_API_TOKEN=" .env; then
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "s|^INTERNAL_API_TOKEN=.*|INTERNAL_API_TOKEN=$internal_token|g" .env
+                else
+                    sed -i "s|^INTERNAL_API_TOKEN=.*|INTERNAL_API_TOKEN=$internal_token|g" .env
+                fi
+            else
+                printf "INTERNAL_API_TOKEN=%s
+" "$internal_token" >> .env
+            fi
+        fi
         print_success "API Key 已写入 .env"
     else
         print_error ".env 不存在且无法创建"

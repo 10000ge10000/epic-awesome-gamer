@@ -8,6 +8,8 @@ import re
 import shutil
 import glob
 import socket
+import selectors
+import traceback
 from bs4 import BeautifulSoup
 
 # Redis
@@ -16,6 +18,9 @@ r = redis.Redis(host=redis_host, port=6379, decode_responses=True)
 WEB_BASE_URL = "http://web:8000"
 WEB_API_URL = f"{WEB_BASE_URL}/api/report_game"
 NUKE_API_URL = f"{WEB_BASE_URL}/api/nuke_account" # 核弹接口
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "900"))
+TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "86400"))
 
 IMAGES_DIR = "/app/data/images"
 os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -41,6 +46,8 @@ EPIC_TEST_TIMEOUT = 10  # 秒
 RETRY_QUEUE = "task_retry_queue"
 CAPTCHA_FAILURE_MAX_RETRIES = int(os.getenv("CAPTCHA_FAILURE_MAX_RETRIES", "2"))
 CAPTCHA_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("CAPTCHA_FAILURE_RETRY_DELAY_SECONDS", "900"))
+NETWORK_FAILURE_MAX_RETRIES = int(os.getenv("NETWORK_FAILURE_MAX_RETRIES", "2"))
+NETWORK_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("NETWORK_FAILURE_RETRY_DELAY_SECONDS", "600"))
 WARP_RESTART_COOLDOWN_SECONDS = int(os.getenv("WARP_RESTART_COOLDOWN_SECONDS", "300"))
 TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "5"))
 
@@ -190,29 +197,56 @@ def restart_warp_for_captcha_retry(email: str) -> bool:
     return ok
 
 
-def schedule_captcha_retry(task_data: dict) -> bool:
-    """把验证码失败任务放入 Redis 延迟队列，限制重试次数和节奏。"""
+def schedule_failure_retry(task_data: dict, error_type: str) -> bool:
+    """把可恢复失败放入 Redis 延迟队列，并限制重试次数和节奏。"""
     email = task_data.get("email", "")
-    retry_count = int(task_data.get("captcha_retry_count", 0))
+    policies = {
+        "captcha_failed": (
+            CAPTCHA_FAILURE_MAX_RETRIES,
+            CAPTCHA_FAILURE_RETRY_DELAY_SECONDS,
+            "验证码失败",
+        ),
+        "network_timeout": (
+            NETWORK_FAILURE_MAX_RETRIES,
+            NETWORK_FAILURE_RETRY_DELAY_SECONDS,
+            "网络连接超时",
+        ),
+    }
+    if error_type not in policies:
+        return False
 
-    if retry_count >= CAPTCHA_FAILURE_MAX_RETRIES:
-        print(f"🛑 [{email}] 验证码失败重试已达上限: {retry_count}/{CAPTCHA_FAILURE_MAX_RETRIES}")
-        r.set(f"status:{email}", "❌ 验证码失败，已达重试上限", ex=3600)
+    max_retries, retry_delay, label = policies[error_type]
+    retry_key = f"{error_type}_retry_count"
+    retry_count = int(task_data.get(retry_key, 0))
+
+    if retry_count >= max_retries:
+        print(f"🛑 [{email}] {label}重试已达上限: {retry_count}/{max_retries}")
+        r.set(f"status:{email}", f"❌ {label}，已达重试上限", ex=3600)
         r.set(f"result:{email}", "fail", ex=3600)
-        r.set(f"hint:{email}", "验证码多次失败，请稍后手动重试或检查账号风控", ex=3600)
+        r.set(f"hint:{email}", f"{label}多次发生，请稍后手动重试", ex=3600)
         return False
 
     restart_warp_for_captcha_retry(email)
 
     next_task = dict(task_data)
-    next_task["captcha_retry_count"] = retry_count + 1
-    run_at = int(time.time() + CAPTCHA_FAILURE_RETRY_DELAY_SECONDS)
+    next_task[retry_key] = retry_count + 1
+    run_at = int(time.time() + retry_delay)
     payload = json.dumps(next_task, ensure_ascii=False)
     r.zadd(RETRY_QUEUE, {payload: run_at})
-    r.set(f"status:{email}", f"⏳ 验证码失败，已换 IP，{CAPTCHA_FAILURE_RETRY_DELAY_SECONDS // 60} 分钟后重试 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]", ex=3600)
+    r.setex(f"retry_pending:{email}", retry_delay + TASK_TIMEOUT_SECONDS + 300, error_type)
+    r.setex(f"task_lock:{email}", retry_delay + TASK_TIMEOUT_SECONDS + 300, "retry_scheduled")
+    r.set(
+        f"status:{email}",
+        f"⏳ {label}，已换 IP，{max(1, retry_delay // 60)} 分钟后重试 "
+        f"[{retry_count + 1}/{max_retries}]",
+        ex=3600,
+    )
     r.set(f"result:{email}", "retry_scheduled", ex=3600)
     r.set(f"hint:{email}", "系统已自动更换 WARP 出口并安排延迟重试", ex=3600)
-    print(f"⏳ [{email}] 已安排验证码失败延迟重试: {CAPTCHA_FAILURE_RETRY_DELAY_SECONDS}s 后执行 [{retry_count + 1}/{CAPTCHA_FAILURE_MAX_RETRIES}]")
+    print(
+        f"⏳ [{email}] 已安排{label}延迟重试: {retry_delay}s 后执行 "
+        f"[{retry_count + 1}/{max_retries}]"
+    )
     return True
 
 
@@ -227,6 +261,8 @@ def move_due_retry_tasks(limit: int = 10) -> int:
             moved += 1
             try:
                 task_data = json.loads(payload)
+                r.delete(f"retry_pending:{task_data.get('email')}")
+                r.setex(f"task_lock:{task_data.get('email')}", TASK_LOCK_SECONDS, "queued_retry")
                 print(f"🚦 [延迟重试] 任务已重新入队: {task_data.get('email')}")
             except Exception:
                 print("🚦 [延迟重试] 任务已重新入队")
@@ -285,6 +321,7 @@ def report_success(email, game_title):
 
     # 显式禁用代理，确保内部服务请求不被 WARP 拦截
     no_proxy = {"http": None, "https": None}
+    headers = {"Authorization": f"Bearer {INTERNAL_API_TOKEN}"}
 
     for attempt in range(3):
         try:
@@ -292,7 +329,8 @@ def report_success(email, game_title):
                 "email": email,
                 "game_title": game_title,
                 "image_filename": filename or "default.png"
-            }, timeout=5, proxies=no_proxy)
+            }, headers=headers, timeout=5, proxies=no_proxy)
+            resp.raise_for_status()
 
             result = resp.json()
             status = result.get("status", "unknown")
@@ -347,11 +385,18 @@ def nuke_account_immediately(email):
 
     # 显式禁用代理，确保内部服务请求不被 WARP 拦截
     no_proxy = {"http": None, "https": None}
+    headers = {"Authorization": f"Bearer {INTERNAL_API_TOKEN}"}
 
     # 1. 呼叫后端删除 (后端权限通常更高)
     try:
         print(f"📞 呼叫后端 API: {NUKE_API_URL}")
-        res = requests.post(NUKE_API_URL, json={"email": email}, timeout=5, proxies=no_proxy)
+        res = requests.post(
+            NUKE_API_URL,
+            json={"email": email},
+            headers=headers,
+            timeout=5,
+            proxies=no_proxy,
+        )
         print(f"📞 后端响应: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"❌ 后端 API 连接失败: {e}")
@@ -474,6 +519,12 @@ ERROR_TYPE_MESSAGES = {
         "hint": "请稍后重试",
         "nuke": False,
     },
+    # 验证码已通过，但 Epic 结账结果无法可靠确认
+    "checkout_failed": {
+        "status": "❌ 无法确认游戏已入库",
+        "hint": "Epic 结账页面可能已更新，请稍后重试并检查游戏库",
+        "nuke": False,
+    },
     # 登录超时
     "login_timeout": {
         "status": "⚠️ 登录超时",
@@ -532,6 +583,54 @@ def translate_log(line):
                 return line
     return line
 
+
+def parse_game_result_line(line: str) -> tuple[str, str] | None:
+    if "GAME_RESULT:" not in line:
+        return None
+    payload = line.split("GAME_RESULT:", 1)[1].strip()
+    game_result = json.loads(payload)
+    title = str(game_result["title"]).strip()
+    status = str(game_result["status"]).strip()
+    if not title or status not in {"claimed", "owned", "failed"}:
+        raise ValueError("invalid game result payload")
+    return title, status
+
+
+def summarize_game_results(game_results: dict[str, str]) -> tuple[list[str], list[str], list[str]]:
+    successful = [
+        title for title, status in game_results.items() if status in {"claimed", "owned"}
+    ]
+    claimed = [title for title, status in game_results.items() if status == "claimed"]
+    failed = [title for title, status in game_results.items() if status == "failed"]
+    return successful, claimed, failed
+
+
+def iter_process_output(process: subprocess.Popen, timeout_seconds: int):
+    """Yield output without allowing a silent child process to run forever."""
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout_seconds
+
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                process.kill()
+                raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+
+            events = selector.select(timeout=1)
+            if events:
+                line = process.stdout.readline()
+                if line:
+                    yield line
+                    continue
+
+            if process.poll() is not None:
+                for line in process.stdout:
+                    yield line
+                break
+    finally:
+        selector.close()
+
 def run_task(task_data):
     email = task_data.get("email")
     password = task_data.get("password")
@@ -563,17 +662,21 @@ def run_task(task_data):
     has_critical_error = False
     is_fatal_failure = False
     is_already_owned = False
+    collection_completed = False
+    game_results: dict[str, str] = {}
+    discovered_games: list[str] = []
 
     # 🔥 新增：记录最终的错误类型
     final_error_type = None
 
+    process = None
     try:
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=env, text=True, bufsize=1
         )
 
-        for line in process.stdout:
+        for line in iter_process_output(process, TASK_TIMEOUT_SECONDS):
             line = line.strip()
             if not line: continue
 
@@ -652,12 +755,23 @@ def run_task(task_data):
                         r.set(f"result:{email}", f"game_error_{game_error}", ex=3600)
                     continue
 
+            if "GAME_RESULT:" in line:
+                try:
+                    title, status = parse_game_result_line(line)
+                    game_results[title] = status
+                    print(f"🎮 游戏结果: {title} -> {status}")
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    print(f"⚠️ 无法解析游戏结果: {exc}")
+                continue
+
             # 🛑 致命错误 A: 无法获取 Cookie
             if "context cookies is not available" in line:
                 r.set(f"status:{email}", "❌ 登录失败：无效账号", ex=300)
                 r.set(f"result:{email}", "fail", ex=3600)
                 is_fatal_failure = True
                 process.kill()
+                with suppress(Exception):
+                    process.wait(timeout=5)
                 nuke_account_immediately(email)
                 return
 
@@ -666,6 +780,8 @@ def run_task(task_data):
                 r.set(f"status:{email}", "❌ 密码错误", ex=300)
                 r.set(f"result:{email}", "fail", ex=3600)
                 process.kill()
+                with suppress(Exception):
+                    process.wait(timeout=5)
                 nuke_account_immediately(email)
                 return
 
@@ -693,6 +809,11 @@ def run_task(task_data):
             # 游戏领取成功，清除错误标记
             if "任务完成" in line or "领取成功" in line:
                 has_critical_error = False
+                collection_completed = True
+
+            if "所有周免游戏已在库中" in line:
+                is_already_owned = True
+                collection_completed = True
 
             # 登录成功识别（匹配多种日志格式）
             if "Authentication completed" in line or "already logged in" in line or "Epic Games 已登录" in line or "✅ 登录成功" in line:
@@ -705,50 +826,70 @@ def run_task(task_data):
                     if match:
                         game_name = match.group(1)
                         r.set(f"status:{email}", f"🎁 发现: {game_name}", ex=3600)
-                        r.set(f"pending_game:{email}", game_name, ex=3600)
+                        if game_name not in discovered_games:
+                            discovered_games.append(game_name)
                         scrape_and_download_image(game_name)
-                except: pass
+                except Exception as exc:
+                    print(f"⚠️ 解析游戏标题失败: {exc}")
 
-            # ============================================================
-            # 🔥 游戏收集完成检测
-            # 匹配多种完成日志格式：
-            # - "🎉 任务完成（已领取或已在库中）"
-            # - "🎉 购物车游戏领取成功"
-            # - "✅ 所有周免游戏已在库中"
-            # ============================================================
-            if ("任务完成" in line or "购物车游戏领取成功" in line or "所有周免游戏已在库中" in line) and not is_fatal_failure:
-                # 等待一小段时间确保游戏标题已解析
-                time.sleep(0.5)
-
-                if is_fatal_failure:
-                    nuke_account_immediately(email)
-                elif final_error_type and final_error_type in ERROR_TYPE_MESSAGES:
-                    # 有明确的错误类型，使用对应的处理
-                    error_info = ERROR_TYPE_MESSAGES[final_error_type]
-                    r.set(f"status:{email}", error_info["status"], ex=3600)
-                    if error_info.get("hint"):
-                        r.set(f"hint:{email}", error_info["hint"], ex=3600)
-                elif has_critical_error and not is_already_owned:
-                    r.set(f"status:{email}", "❌ 任务异常结束", ex=3600)
-                    r.set(f"result:{email}", "fail", ex=3600)
-                else:
-                    pending_game = r.get(f"pending_game:{email}")
-                    if pending_game:
-                        report_success(email, pending_game)
-                    if is_already_owned or "已在库中" in line:
-                        r.set(f"status:{email}", "✅ 任务完成（已在库中）", ex=3600)
-                        r.set(f"result:{email}", "success_owned", ex=3600)
-                    else:
-                        r.set(f"status:{email}", "🎉 领取成功！", ex=3600)
-                        r.set(f"result:{email}", "success_new", ex=3600)
-
-        process.wait()
+        return_code = process.wait(timeout=10)
 
         # 正常结束，执行常规瘦身
         clean_user_profile(email)
 
-        if final_error_type == "captcha_failed" and not is_fatal_failure:
-            schedule_captcha_retry(task_data)
+        if final_error_type in {"captcha_failed", "network_timeout"} and not is_fatal_failure:
+            schedule_failure_retry(task_data, final_error_type)
+            return
+
+        if return_code != 0 and not final_error_type:
+            final_error_type = "unknown"
+
+        successful_games, claimed_games, failed_games = summarize_game_results(game_results)
+
+        if successful_games:
+            report_failures = []
+            for game_title in successful_games:
+                if not report_success(email, game_title):
+                    report_failures.append(game_title)
+            if failed_games or report_failures or (
+                final_error_type and final_error_type not in {"success", "all_owned"}
+            ):
+                r.set(f"status:{email}", "⚠️ 部分游戏领取失败", ex=3600)
+                r.set(f"result:{email}", "error_unknown_error", ex=3600)
+                failure_parts = failed_games + report_failures
+                failure_detail = ", ".join(failure_parts) or final_error_type
+                r.set(
+                    f"hint:{email}",
+                    f"失败详情: {failure_detail}",
+                    ex=3600,
+                )
+            elif claimed_games:
+                r.set(f"status:{email}", f"🎉 已领取 {len(claimed_games)} 个游戏", ex=3600)
+                r.set(f"result:{email}", "success_new", ex=3600)
+            else:
+                r.set(f"status:{email}", "✅ 任务完成（已在库中）", ex=3600)
+                r.set(f"result:{email}", "success_owned", ex=3600)
+            return
+
+        if final_error_type and final_error_type not in {"success", "all_owned"}:
+            error_info = ERROR_TYPE_MESSAGES.get(final_error_type, ERROR_TYPE_MESSAGES["unknown"])
+            r.set(f"status:{email}", error_info["status"], ex=3600)
+            if error_info.get("hint"):
+                r.set(f"hint:{email}", error_info["hint"], ex=3600)
+            r.set(f"result:{email}", f"error_{final_error_type}", ex=3600)
+            return
+
+        # Backward-compatible fallback for older deploy output.
+        if collection_completed and discovered_games and not has_critical_error:
+            for game_title in discovered_games:
+                report_success(email, game_title)
+            r.set(f"status:{email}", "🎉 领取成功！", ex=3600)
+            r.set(f"result:{email}", "success_new", ex=3600)
+            return
+
+        if is_already_owned and not has_critical_error:
+            r.set(f"status:{email}", "✅ 任务完成（已在库中）", ex=3600)
+            r.set(f"result:{email}", "success_owned", ex=3600)
             return
 
         if mode == 'verify':
@@ -760,11 +901,25 @@ def run_task(task_data):
                     r.set(f"result:{email}", "fail", ex=3600)
                     if not r.get(f"status:{email}"):
                         r.set(f"status:{email}", "❌ 验证失败", ex=3600)
+        elif not r.get(f"result:{email}"):
+            r.set(f"status:{email}", "❌ 未能确认领取结果", ex=3600)
+            r.set(f"result:{email}", "fail", ex=3600)
 
+    except subprocess.TimeoutExpired:
+        print(f"❌ [{email}] 任务超过硬超时 {TASK_TIMEOUT_SECONDS}s，已终止子进程")
+        r.set(f"status:{email}", "❌ 任务执行超时", ex=3600)
+        r.set(f"hint:{email}", "浏览器任务长时间无响应，请稍后重试", ex=3600)
+        r.set(f"result:{email}", "fail", ex=3600)
     except Exception as e:
         print(f"Error: {e}")
+        traceback.print_exc()
         r.set(f"status:{email}", "❌ 系统错误", ex=3600)
         r.set(f"result:{email}", "fail", ex=3600)
+    finally:
+        if process and process.poll() is None:
+            process.kill()
+            with suppress(Exception):
+                process.wait(timeout=5)
 
 def main_loop():
     while True:
@@ -772,8 +927,18 @@ def main_loop():
         task = r.blpop("task_queue", timeout=10)
         if task:
             _, data_json = task
-            try: run_task(json.loads(data_json))
-            except: pass
+            email = None
+            try:
+                task_data = json.loads(data_json)
+                email = task_data.get("email")
+                if email:
+                    r.setex(f"task_lock:{email}", TASK_LOCK_SECONDS, "running")
+                run_task(task_data)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                if email and not r.exists(f"retry_pending:{email}"):
+                    r.delete(f"task_lock:{email}")
             if TASK_SPACING_SECONDS > 0:
                 time.sleep(TASK_SPACING_SECONDS)
         else:
