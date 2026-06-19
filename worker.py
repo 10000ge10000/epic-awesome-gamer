@@ -9,7 +9,9 @@ import shutil
 import glob
 import socket
 import selectors
+import signal
 import traceback
+from contextlib import suppress
 from bs4 import BeautifulSoup
 
 # Redis
@@ -50,6 +52,75 @@ NETWORK_FAILURE_MAX_RETRIES = int(os.getenv("NETWORK_FAILURE_MAX_RETRIES", "2"))
 NETWORK_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("NETWORK_FAILURE_RETRY_DELAY_SECONDS", "600"))
 WARP_RESTART_COOLDOWN_SECONDS = int(os.getenv("WARP_RESTART_COOLDOWN_SECONDS", "300"))
 TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "5"))
+PID_WARN_THRESHOLD = int(os.getenv("PID_WARN_THRESHOLD", "250"))
+ZOMBIE_WARN_THRESHOLD = int(os.getenv("ZOMBIE_WARN_THRESHOLD", "1"))
+RESIDUAL_PROCESS_PATTERNS = (
+    "app/deploy.py",
+    "xvfb-run",
+    "Xvfb",
+    "firefox",
+    "camoufox",
+    "playwright",
+)
+_sigchld_seen = False
+
+
+def _mark_sigchld(signum, frame):
+    global _sigchld_seen
+    _sigchld_seen = True
+
+
+with suppress(Exception):
+    signal.signal(signal.SIGCHLD, _mark_sigchld)
+
+
+def _read_text(path: str, default: str = "unknown") -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip() or default
+    except OSError:
+        return default
+
+
+def collect_process_metrics() -> dict[str, int]:
+    """Return lightweight process counts for worker health logs."""
+    process_count = 0
+    zombie_count = 0
+    with suppress(OSError):
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            process_count += 1
+            status = _read_text(os.path.join(entry.path, "stat"), "")
+            parts = status.split()
+            if len(parts) > 2 and parts[2] == "Z":
+                zombie_count += 1
+    return {"process_count": process_count, "zombie_count": zombie_count}
+
+
+def log_worker_runtime_health(prefix: str = "worker") -> dict[str, int]:
+    metrics = collect_process_metrics()
+    print(
+        f"📊 [{prefix}] process_count={metrics['process_count']} "
+        f"zombie_count={metrics['zombie_count']}"
+    )
+    if metrics["process_count"] >= PID_WARN_THRESHOLD:
+        print(f"⚠️ [{prefix}] PID 数接近上限: {metrics['process_count']}/{PID_WARN_THRESHOLD}")
+    if metrics["zombie_count"] >= ZOMBIE_WARN_THRESHOLD:
+        print(f"⚠️ [{prefix}] 检测到 zombie 进程: {metrics['zombie_count']}")
+    return metrics
+
+
+def log_worker_boot_info() -> None:
+    pid1_cmdline = _read_text("/proc/1/cmdline", "").replace("\x00", " ").strip()
+    print(
+        "🧭 Worker runtime: "
+        f"pid={os.getpid()} ppid={os.getppid()} "
+        f"pid1={pid1_cmdline or 'unknown'} "
+        f"pids.max={_read_text('/sys/fs/cgroup/pids.max')} "
+        f"cpu.max={_read_text('/sys/fs/cgroup/cpu.max')}"
+    )
+    log_worker_runtime_health("startup")
 
 
 def check_warp_proxy() -> tuple[bool, str]:
@@ -614,7 +685,7 @@ def iter_process_output(process: subprocess.Popen, timeout_seconds: int):
     try:
         while True:
             if time.monotonic() >= deadline:
-                process.kill()
+                terminate_process_group(process)
                 raise subprocess.TimeoutExpired(process.args, timeout_seconds)
 
             events = selector.select(timeout=1)
@@ -630,6 +701,129 @@ def iter_process_output(process: subprocess.Popen, timeout_seconds: int):
                 break
     finally:
         selector.close()
+
+
+def terminate_process_group(process: subprocess.Popen, grace_seconds: int = 5) -> None:
+    """Terminate the browser task and every child process it spawned."""
+    if process.poll() is not None:
+        return
+
+    try:
+        process_group_id = os.getpgid(process.pid)
+        if process_group_id != os.getpgrp():
+            os.killpg(process_group_id, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+
+    with suppress(Exception):
+        process.wait(timeout=grace_seconds)
+        return
+
+    with suppress(ProcessLookupError):
+        process_group_id = os.getpgid(process.pid)
+        if process_group_id != os.getpgrp():
+            os.killpg(process_group_id, signal.SIGKILL)
+        else:
+            process.kill()
+
+    with suppress(Exception):
+        process.wait(timeout=grace_seconds)
+
+
+def reap_child_processes() -> int:
+    """Reap orphaned children adopted by worker after browser shutdown."""
+    global _sigchld_seen
+    reaped = 0
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        except InterruptedError:
+            continue
+        if pid == 0:
+            break
+        reaped += 1
+    if reaped:
+        print(f"🧹 已回收孤儿子进程: {reaped}")
+    _sigchld_seen = False
+    return reaped
+
+
+def _iter_process_rows() -> list[dict[str, str | int]]:
+    try:
+        output = subprocess.check_output(
+            ["ps", "-eo", "pid=,ppid=,stat=,comm=,args="],
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        print(f"⚠️ 无法读取进程列表: {exc}")
+        return []
+
+    rows = []
+    for line in output.splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) < 5:
+            continue
+        pid, ppid, stat, comm, args = parts
+        with suppress(ValueError):
+            rows.append(
+                {
+                    "pid": int(pid),
+                    "ppid": int(ppid),
+                    "stat": stat,
+                    "comm": comm,
+                    "args": args,
+                }
+            )
+    return rows
+
+
+def _residual_browser_pids() -> list[int]:
+    current_pid = os.getpid()
+    pids = []
+    for row in _iter_process_rows():
+        pid = int(row["pid"])
+        if pid in {0, 1, current_pid}:
+            continue
+        if "Z" in str(row["stat"]):
+            continue
+        command_text = f"{row['comm']} {row['args']}"
+        if any(pattern in command_text for pattern in RESIDUAL_PROCESS_PATTERNS):
+            pids.append(pid)
+    return sorted(set(pids), reverse=True)
+
+
+def cleanup_residual_browser_processes(grace_seconds: int = 3) -> int:
+    """Terminate leftover browser/Xvfb processes after a task finishes."""
+    pids = _residual_browser_pids()
+    if not pids:
+        return 0
+
+    print(f"🧹 检测到浏览器残留进程: {pids}")
+    for pid in pids:
+        with suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGTERM)
+
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if not _residual_browser_pids():
+            break
+        time.sleep(0.2)
+
+    survivors = _residual_browser_pids()
+    for pid in survivors:
+        with suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+
+    reaped = reap_child_processes()
+    killed_count = len(pids)
+    print(f"🧹 浏览器残留清理完成: signaled={killed_count} reaped={reaped}")
+    return killed_count
+
 
 def run_task(task_data):
     email = task_data.get("email")
@@ -673,7 +867,7 @@ def run_task(task_data):
     try:
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=env, text=True, bufsize=1
+            env=env, text=True, bufsize=1, start_new_session=True
         )
 
         for line in iter_process_output(process, TASK_TIMEOUT_SECONDS):
@@ -769,9 +963,7 @@ def run_task(task_data):
                 r.set(f"status:{email}", "❌ 登录失败：无效账号", ex=300)
                 r.set(f"result:{email}", "fail", ex=3600)
                 is_fatal_failure = True
-                process.kill()
-                with suppress(Exception):
-                    process.wait(timeout=5)
+                terminate_process_group(process)
                 nuke_account_immediately(email)
                 return
 
@@ -779,9 +971,7 @@ def run_task(task_data):
             if "invalid_account_credentials" in line or "账号或密码错误" in line:
                 r.set(f"status:{email}", "❌ 密码错误", ex=300)
                 r.set(f"result:{email}", "fail", ex=3600)
-                process.kill()
-                with suppress(Exception):
-                    process.wait(timeout=5)
+                terminate_process_group(process)
                 nuke_account_immediately(email)
                 return
 
@@ -917,12 +1107,16 @@ def run_task(task_data):
         r.set(f"result:{email}", "fail", ex=3600)
     finally:
         if process and process.poll() is None:
-            process.kill()
-            with suppress(Exception):
-                process.wait(timeout=5)
+            terminate_process_group(process)
+        cleanup_residual_browser_processes()
+        reap_child_processes()
+        log_worker_runtime_health(f"after_task:{email}")
 
 def main_loop():
+    log_worker_boot_info()
     while True:
+        if _sigchld_seen:
+            reap_child_processes()
         move_due_retry_tasks()
         task = r.blpop("task_queue", timeout=10)
         if task:
@@ -941,7 +1135,9 @@ def main_loop():
                     r.delete(f"task_lock:{email}")
             if TASK_SPACING_SECONDS > 0:
                 time.sleep(TASK_SPACING_SECONDS)
+            reap_child_processes()
         else:
+            reap_child_processes()
             time.sleep(0.1)
 
 if __name__ == "__main__":

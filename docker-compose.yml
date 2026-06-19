@@ -113,6 +113,9 @@ services:
     image: epic-kiosk-worker:local
     container_name: epic-worker
     user: root
+    init: true
+    cpus: "0.50"
+    pids_limit: 300
     volumes:
       - ./data:/app/data
       - ./data:/app/app/volumes
