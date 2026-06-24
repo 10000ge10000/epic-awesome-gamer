@@ -39,6 +39,14 @@ ACCOUNT_TOTAL_OFFSET = int(os.getenv("ACCOUNT_TOTAL_OFFSET", "0"))
 USER_DATA_DIR = os.path.join(DATA_DIR, "user_data")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(USER_DATA_DIR, exist_ok=True)
+ENABLE_APSCHEDULER = os.getenv("ENABLE_APSCHEDULER", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DAILY_SCHEDULE_LOCK_SECONDS = int(os.getenv("DAILY_SCHEDULE_LOCK_SECONDS", "86400"))
+SCHEDULER_INSTANCE_ID = os.getenv("HOSTNAME", "web")
 
 # 2. Redis
 redis_host = os.getenv("REDIS_HOST", "localhost")
@@ -327,6 +335,12 @@ def push_task_to_redis(task_json):
         print(f"⏭️ [错峰执行] 跳过重复任务: {task_data['email']}")
 
 def daily_job():
+    today = datetime.now().strftime("%Y%m%d")
+    lock_key = f"daily_schedule_lock:{today}"
+    if not r.set(lock_key, SCHEDULER_INSTANCE_ID, nx=True, ex=DAILY_SCHEDULE_LOCK_SECONDS):
+        print(f"⏭️ 今日自动调度已由其他 Web 实例接管: {today}")
+        return
+
     print("⏰ 12点已到，正在为所有账号计算随机延迟...")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -360,6 +374,9 @@ scheduler.add_job(daily_job, 'cron', hour=12, minute=0)
 
 @app.on_event("startup")
 async def start_scheduler():
+    if not ENABLE_APSCHEDULER:
+        print("⏸️ APScheduler 未启用，跳过每日自动调度")
+        return
     if not scheduler.running:
         scheduler.start()
 

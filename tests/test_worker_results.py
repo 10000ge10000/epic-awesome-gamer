@@ -45,6 +45,26 @@ class WorkerResultTests(unittest.TestCase):
         process.stdout.close()
         self.assertIsNotNone(process.returncode)
 
+    def test_process_output_replaces_invalid_utf8(self):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'\\xff\\xfeinvalid\\n'); sys.stdout.flush()",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        lines = list(worker.iter_process_output(process, 2))
+        process.wait(timeout=2)
+        process.stdout.close()
+
+        self.assertIn("invalid", "".join(lines))
+
     def test_terminate_process_group_kills_child_process(self):
         child_code = "import time; time.sleep(30)"
         parent_code = (
@@ -121,6 +141,15 @@ class WorkerResultTests(unittest.TestCase):
 
     @staticmethod
     def _process_exists(pid):
+        if os.name == "nt":
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return str(pid) in result.stdout
+
         try:
             os.kill(pid, 0)
         except ProcessLookupError:

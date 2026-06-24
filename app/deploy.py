@@ -28,6 +28,7 @@ from pytz import timezone
 
 from services.epic_authorization_service import EpicAuthorization, ErrorType
 from services.epic_games_service import EpicAgent, GameCollectResult
+from services.epic_games_service import _is_driver_disconnect_error
 from settings import LOG_DIR, RECORD_DIR
 from settings import settings
 from utils import init_log
@@ -42,7 +43,6 @@ init_log(
 TIMEZONE = timezone("Asia/Shanghai")
 
 
-@logger.catch
 async def execute_browser_tasks(headless: bool = True) -> ErrorType:
     """
     Execute Epic Games free game collection tasks using browser automation.
@@ -76,69 +76,79 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
             proxy_config["password"] = parsed.password
         logger.info(f"🌐 使用代理: {parsed.hostname}:{parsed.port}")
 
-    # Configure browser with anti-detection features
-    async with AsyncCamoufox(
-        persistent_context=True,
-        user_data_dir=settings.user_data_dir,
-        screen=Screen(max_width=1920, max_height=1080, min_height=1080, min_width=1920),
-        humanize=0.2,
-        headless=headless,
-        proxy=proxy_config,
-    ) as browser:
-        # Initialize or reuse existing browser page
-        page = browser.pages[0] if browser.pages else await browser.new_page()
-        logger.debug("Browser initialized successfully")
+    try:
+        # Configure browser with anti-detection features
+        async with AsyncCamoufox(
+            persistent_context=True,
+            user_data_dir=settings.user_data_dir,
+            screen=Screen(max_width=1920, max_height=1080, min_height=1080, min_width=1920),
+            humanize=0.2,
+            headless=headless,
+            proxy=proxy_config,
+        ) as browser:
+            # Initialize or reuse existing browser page
+            page = browser.pages[0] if browser.pages else await browser.new_page()
+            logger.debug("Browser initialized successfully")
 
-        # Handle Epic Games authentication
-        logger.debug("Initiating Epic Games authentication")
-        auth_agent = EpicAuthorization(page)
-        auth_result = await auth_agent.invoke()
-        logger.debug(f"Authentication result: {auth_result.value if auth_result else 'None'}")
+            # Handle Epic Games authentication
+            logger.debug("Initiating Epic Games authentication")
+            auth_agent = EpicAuthorization(page)
+            auth_result = await auth_agent.invoke()
+            logger.debug(f"Authentication result: {auth_result.value if auth_result else 'None'}")
 
-        # ============================================================
-        # 🔥 错误类型处理
-        # 根据不同的错误类型输出特定格式的日志，便于 worker.py 解析
-        # ============================================================
-        if auth_result != ErrorType.SUCCESS:
-            # 输出特定格式的错误日志，便于 worker.py 解析
-            # 格式: ❌ ERROR_TYPE:xxx 其中 xxx 是 ErrorType 的 value
-            logger.error(f"❌ ERROR_TYPE:{auth_result.value}")
-            return auth_result
+            # ============================================================
+            # 🔥 错误类型处理
+            # 根据不同的错误类型输出特定格式的日志，便于 worker.py 解析
+            # ============================================================
+            if auth_result != ErrorType.SUCCESS:
+                # 输出特定格式的错误日志，便于 worker.py 解析
+                # 格式: ❌ ERROR_TYPE:xxx 其中 xxx 是 ErrorType 的 value
+                auth_error = auth_result or ErrorType.UNKNOWN
+                logger.error(f"❌ ERROR_TYPE:{auth_error.value}")
+                return auth_error
 
-        logger.debug("Authentication completed successfully")
+            logger.debug("Authentication completed successfully")
 
-        # ============================================================
-        # 🔥 修复：使用已认证的页面进行游戏收集
-        # 不要创建新页面，否则会丢失登录状态（Cookie）
-        # ============================================================
-        logger.debug("Starting free games collection process")
-        # 使用已认证的页面，而不是创建新页面
-        agent = EpicAgent(page)
-        game_result = await agent.collect_epic_games()
+            # 登录 Agent 会注册 hCaptcha response 监听器。使用同一浏览器
+            # context 的干净页面继续领取，Cookie 保持共享，同时彻底终止
+            # 登录页上仍在运行的 HSW 回调，避免其阻塞商品按钮点击。
+            claim_page = await page.context.new_page()
+            await page.close()
+            page = claim_page
 
-        # ============================================================
-        # 🔥 游戏收集结果处理
-        # 根据不同的结果类型输出特定格式的日志
-        # ============================================================
-        if game_result == GameCollectResult.ALL_OWNED:
-            logger.success("✅ 所有周免游戏已在库中")
-        elif game_result == GameCollectResult.SUCCESS:
-            logger.success("🎉 游戏领取成功！")
-        else:
-            # 失败情况：输出错误类型供 worker.py 解析
-            logger.error(f"❌ GAME_ERROR:{game_result.value}")
+            logger.debug("Starting free games collection process")
+            agent = EpicAgent(page)
+            game_result = await agent.collect_epic_games()
 
-        # Cleanup browser resources
-        logger.debug("Cleaning up browser resources")
-        with suppress(Exception):
-            for p in browser.pages:
-                await p.close()
+            # ============================================================
+            # 🔥 游戏收集结果处理
+            # 根据不同的结果类型输出特定格式的日志
+            # ============================================================
+            if game_result == GameCollectResult.ALL_OWNED:
+                logger.success("✅ 所有周免游戏已在库中")
+            elif game_result == GameCollectResult.SUCCESS:
+                logger.success("🎉 游戏领取成功！")
+            else:
+                # 失败情况：输出错误类型供 worker.py 解析
+                logger.error(f"❌ GAME_ERROR:{game_result.value}")
 
-        with suppress(Exception):
-            await browser.close()
+            # Cleanup browser resources
+            logger.debug("Cleaning up browser resources")
+            with suppress(Exception):
+                for p in browser.pages:
+                    await p.close()
 
-        logger.debug("Browser tasks execution finished successfully")
-        return ErrorType.SUCCESS
+            with suppress(Exception):
+                await browser.close()
+
+            logger.debug("Browser tasks execution finished successfully")
+            return ErrorType.SUCCESS
+    except Exception as exc:
+        logger.exception(exc)
+        if _is_driver_disconnect_error(exc):
+            logger.error("❌ FINAL_ERROR:network_timeout")
+            return ErrorType.NETWORK_TIMEOUT
+        return ErrorType.UNKNOWN
 
 
 async def deploy():
@@ -159,6 +169,9 @@ async def deploy():
 
     # Execute an immediate collection task
     result = await execute_browser_tasks(headless=headless)
+    if result is None:
+        logger.error("❌ 浏览器任务未返回明确结果，按未知错误处理")
+        result = ErrorType.UNKNOWN
 
     # 如果任务失败，输出最终错误类型（便于 worker.py 解析）
     if result != ErrorType.SUCCESS:

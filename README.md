@@ -134,7 +134,7 @@ docker compose up -d --build
 | 类型 | 主模型 | 备用模型 | 用途 |
 |------|--------|----------|------|
 | 主力文本 | `deepseek-ai/DeepSeek-V4-Flash` | `deepseek-ai/DeepSeek-V4-Pro` | 页面判断、流程决策、结构化文本输出 |
-| 验证码视觉 | `Qwen/Qwen3-VL-32B-Instruct` | `Qwen/Qwen3-VL-30B-A3B-Instruct` | hCaptcha 图像识别 |
+| 验证码视觉 | `Qwen/Qwen3-VL-30B-A3B-Thinking` | `Qwen/Qwen3.5-397B-A17B` | hCaptcha 空间推理；主模型连续失败后切换到实测更快的备用模型 |
 
 相关环境变量：
 
@@ -143,8 +143,10 @@ API_PROVIDER=siliconflow
 API_BASE_URL=https://api.siliconflow.cn/v1
 PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
 PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
-CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
-CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+CAPTCHA_MODEL=Qwen/Qwen3-VL-30B-A3B-Thinking
+CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3.5-397B-A17B
+ENABLE_APSCHEDULER=true
+DAILY_SCHEDULE_LOCK_SECONDS=86400
 ```
 
 智能切换机制：
@@ -155,6 +157,7 @@ CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
 - 验证码失败会触发 WARP 换 IP，并将账号放入延迟队列，默认 15 分钟后重试，最多 2 次。
 - 网络超时默认延迟 10 分钟重试，最多 2 次。
 - 结账只有在成功页、支付框关闭或商品页显示已入库时才会记录为成功。
+- 每日自动调度必须显式设置 `ENABLE_APSCHEDULER=true`，并通过 Redis 日锁保证同一天只有一个 Web 实例安排任务；临时预览 Web 容器不要开启，避免重复入队。
 - Docker 容器日志和应用文件日志均按 1 MB 自动轮转，避免长期运行撑满磁盘。
 
 ### 费用与额度

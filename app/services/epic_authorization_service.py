@@ -147,8 +147,11 @@ class EpicAuthorization:
         # 重置错误码
         self._login_error_code = None
 
-        # 尽可能早地初始化机器人
-        agent = AgentV(page=self.page, agent_config=settings)
+        # 登录 API 通常会在 15 秒内直接返回。仅在首轮等待未成功时
+        # 初始化验证码 Agent，避免无验证码账号仍启动昂贵的 HSW 处理。
+        agent: AgentV | None = None
+        captcha_task: asyncio.Task | None = None
+        result_task: asyncio.Task | None = None
 
         # {{< SIGN IN PAGE >}}
         logger.debug("Login with Email")
@@ -186,14 +189,16 @@ class EpicAuthorization:
                 """处理验证码（如果需要）"""
                 nonlocal captcha_success
                 try:
+                    assert agent is not None
+                    if agent._captcha_payload_queue.empty():
+                        await agent.robotic_arm.refresh_challenge()
                     await agent.wait_for_challenge()
                     captcha_success = True
                 except Exception as e:
                     logger.warning(f"验证码处理异常: {e}")
                     pass  # 验证码处理失败不影响登录结果判断
 
-            # 同时启动两个任务
-            captcha_task = asyncio.create_task(handle_captcha())
+            # 先只等待登录 API；大多数账号不需要启动验证码 Agent。
             result_task = asyncio.create_task(wait_for_login_result())
 
             # 第一阶段：15秒内快速检测密码错误
@@ -208,7 +213,6 @@ class EpicAuthorization:
                     result = result_task.result()
                     # 检查是否是登录失败信号
                     if result.get("error"):
-                        captcha_task.cancel()
                         error_code = result.get("code", "")
                         if "invalid_account_credentials" in error_code:
                             logger.error("❌ 账号或密码错误")
@@ -222,7 +226,6 @@ class EpicAuthorization:
 
                     # 登录成功（无验证码或已通过）
                     if result.get("accountId"):
-                        captcha_task.cancel()
                         logger.success("✅ 登录成功")
                         await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
                         logger.success("✅ 账号验证成功")
@@ -230,9 +233,11 @@ class EpicAuthorization:
             except asyncio.CancelledError:
                 pass
 
-            # 第二阶段：继续等待验证码处理后的结果（最多再等 60 秒）
+            # 第二阶段：首轮未登录才启动验证码处理，并继续等待结果。
+            agent = AgentV(page=self.page, agent_config=settings)
+            captcha_task = asyncio.create_task(handle_captcha())
             try:
-                result = await asyncio.wait_for(self._is_login_success_signal.get(), timeout=60)
+                result = await asyncio.wait_for(result_task, timeout=60)
 
                 if result.get("error"):
                     error_code = result.get("code", "")
@@ -266,11 +271,19 @@ class EpicAuthorization:
             logger.warning(f"登录异常: {err}")
             return (False, ErrorType.UNKNOWN)
         finally:
-            # 确保清理任务
-            try:
+            # 登录阶段的 AgentV 监听器不能泄漏到商品页，否则会继续处理
+            # 隐藏的 hCaptcha 响应并阻塞后续点击。
+            if captcha_task is not None:
                 captcha_task.cancel()
-            except:
-                pass
+                with suppress(asyncio.CancelledError):
+                    await captcha_task
+            if result_task is not None and not result_task.done():
+                result_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await result_task
+            if agent is not None:
+                with suppress(Exception):
+                    self.page.remove_listener("response", agent._task_handler)
 
     async def _handle_eula_correction(self) -> tuple[bool, ErrorType]:
         """

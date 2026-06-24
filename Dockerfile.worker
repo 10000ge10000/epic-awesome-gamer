@@ -44,21 +44,197 @@ RUN apt-get update && apt-get install -y \
 # 安装 uv
 RUN pip install --no-cache-dir uv
 
-# 复制项目文件
+# 先复制依赖清单，业务源码放在浏览器依赖层之后，避免每次改代码都重装浏览器。
 COPY pyproject.toml ./
-COPY app ./app
 
 # 安装 Python 依赖
 RUN uv pip install --system --no-cache \
     apscheduler>=3.11.0 \
     pydantic-settings>=2.8.1 \
     celery[redis]>=5.4.0 \
-    "hcaptcha-challenger[camoufox]>=0.18.13" \
+    "hcaptcha-challenger[camoufox]==0.19.0" \
+    "camoufox[geoip]==0.4.11" \
+    "playwright==1.56.0" \
     openai \
     redis \
     requests \
     beautifulsoup4 \
     lxml
+
+# Epic 结账页的 hCaptcha payload/iframe 到达时间不稳定。
+# hcaptcha-challenger 0.19.0 对当前 Epic 新结账 iframe 偏激进：
+# - payload/frame 等待时间偏短；
+# - 只接受固定域名且可见的叶子 challenge frame；
+# - getcaptcha 反解失败后会递归重试，容易把 worker 挂到硬超时。
+# 这里在镜像构建期做可复现的小补丁，避免运行时手改 site-packages。
+RUN python3 - <<'PY'
+import re
+from pathlib import Path
+
+target = Path("/usr/local/lib/python3.12/site-packages/hcaptcha_challenger/agent/challenger.py")
+text = target.read_text()
+text = text.replace(
+    "self._captcha_payload_queue.get(), timeout=30.0",
+    "self._captcha_payload_queue.get(), timeout=float(os.getenv(\"HCAPTCHA_PAYLOAD_TIMEOUT\", \"60\"))",
+)
+text = text.replace(
+    "self._captcha_payload_queue.get(), timeout=10\n",
+    "self._captcha_payload_queue.get(), timeout=float(os.getenv(\"HCAPTCHA_PAYLOAD_TIMEOUT\", \"60\"))\n",
+)
+
+new = '''    async def get_challenge_frame_locator(self) -> Frame | None:
+        timeout_s = float(os.getenv("HCAPTCHA_FRAME_TIMEOUT", "30"))
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        last_candidate: Frame | None = None
+
+        def is_challenge_frame(frame: Frame) -> bool:
+            url = frame.url or ""
+            return "hcaptcha.com" in url and "frame=challenge" in url
+
+        while True:
+            try:
+                challenge_frames = [frame for frame in self.page.frames if is_challenge_frame(frame)]
+                for frame in challenge_frames:
+                    last_candidate = frame
+                    with suppress(Exception):
+                        challenge_view = frame.locator("//div[contains(@class, 'challenge-view')]")
+                        if await challenge_view.is_visible(timeout=1000):
+                            return frame
+                    with suppress(Exception):
+                        if await frame.locator("//div[contains(@class, 'challenge-view')]").count() > 0:
+                            return frame
+            except Exception as e:
+                logger.error(f"Error finding hCaptcha challenge iframes: {e}")
+
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await self.page.wait_for_timeout(500)
+
+        if last_candidate:
+            logger.warning("Using hCaptcha challenge frame without visible challenge-view")
+            return last_candidate
+
+        frame_urls = []
+        with suppress(Exception):
+            frame_urls = [frame.url for frame in self.page.frames if "hcaptcha" in (frame.url or "")]
+        logger.error(f"Cannot find a valid challenge frame; hcaptcha_frames={frame_urls}")
+        return None
+'''
+pattern = re.compile(
+    r"    async def get_challenge_frame_locator\(self\) -> Frame \| None:\n"
+    r".*?"
+    r"(?=\n    def _find_challenge_frame_recursive)",
+    re.S,
+)
+text, count = pattern.subn(new, text, count=1)
+if count != 1:
+    raise SystemExit("get_challenge_frame_locator patch anchor not found")
+
+text = text.replace(
+    "and child_frame.url.startswith(\"https://newassets.hcaptcha.com/captcha/v1/\")\n"
+    "                and \"frame=challenge\" in child_frame.url",
+    "and \"hcaptcha.com\" in (child_frame.url or \"\")\n"
+    "                and \"frame=challenge\" in (child_frame.url or \"\")",
+)
+
+text = text.replace(
+    "        frame_challenge = await self.get_challenge_frame_locator()\n\n"
+    "        samples = frame_challenge.locator(\"//div[@class='task-image']\")",
+    "        frame_challenge = await self.get_challenge_frame_locator()\n"
+    "        if frame_challenge is None:\n"
+    "            raise RuntimeError(\"hcaptcha challenge frame not found\")\n\n"
+    "        samples = frame_challenge.locator(\"//div[@class='task-image']\")",
+)
+
+text = text.replace(
+    "        self.cr_list: List[CaptchaResponse] = []\n\n"
+    "        self.page.on(\"response\", self._task_handler)",
+    "        self.cr_list: List[CaptchaResponse] = []\n"
+    "        self._solve_attempt_count = 0\n\n"
+    "        self.page.on(\"response\", self._task_handler)",
+)
+
+# Epic serves hsw.js/getcaptcha with an encoding Firefox cannot expose through
+# response.text/body. Skip the failing reverse path and let RoboticArm inspect
+# the visible challenge DOM, which is the library's supported fallback.
+text = text.replace(
+    "        if response.url.endswith(\"/hsw.js\"):\n"
+    "            try:\n",
+    "        if response.url.endswith(\"/hsw.js\"):\n"
+    "            return\n"
+    "            try:\n",
+    1,
+)
+text = text.replace(
+    "            # Content-Type: stream\n"
+    "            try:\n",
+    "            # Content-Type: stream\n"
+    "            self._captcha_payload_queue.put_nowait(None)\n"
+    "            return\n"
+    "            try:\n",
+    1,
+)
+
+text = text.replace(
+    "                hsw_text = await response.text()\n"
+    "                await self.page.evaluate(hsw_text)\n"
+    "                await self.page.evaluate(\n",
+    "                hsw_text = await response.text()\n"
+    "                context = getattr(response, \"frame\", None) or self.page\n"
+    "                await context.evaluate(hsw_text)\n"
+    "                await context.evaluate(\n",
+)
+
+text = text.replace(
+    "                has_hsw = await self.page.evaluate(\n"
+    "                    \"\"\"\n"
+    "                    () => {\n"
+    "                        return typeof hsw === 'function' ? true : false;\n"
+    "                    }\n"
+    "                    \"\"\"\n"
+    "                )\n\n"
+    "                if has_hsw:\n"
+    "                    result = await self.page.evaluate(\n",
+    "                context = getattr(response, \"frame\", None) or self.page\n"
+    "                has_hsw = await context.evaluate(\n"
+    "                    \"\"\"\n"
+    "                    () => {\n"
+    "                        return typeof hsw === 'function' ? true : false;\n"
+    "                    }\n"
+    "                    \"\"\"\n"
+    "                )\n\n"
+    "                if has_hsw:\n"
+    "                    result = await context.evaluate(\n",
+)
+
+text = text.replace(
+    "    async def _solve_captcha(self):\n"
+    "        challenge_type = await self._review_challenge_type()",
+    "    async def _solve_captcha(self):\n"
+    "        self._solve_attempt_count += 1\n"
+    "        max_attempts = int(os.getenv(\"HCAPTCHA_SOLVE_MAX_ATTEMPTS\", \"4\"))\n"
+    "        if self._solve_attempt_count > max_attempts:\n"
+    "            raise RuntimeError(\"hcaptcha solve max attempts exceeded\")\n"
+    "        challenge_type = await self._review_challenge_type()",
+)
+
+text = text.replace(
+    "            if self._captcha_response_queue.empty():\n"
+    "                await asyncio.wait_for(self._solve_captcha(), timeout=self.config.EXECUTION_TIMEOUT)",
+    "            if self._captcha_response_queue.empty():\n"
+    "                self._solve_attempt_count = 0\n"
+    "                await asyncio.wait_for(self._solve_captcha(), timeout=self.config.EXECUTION_TIMEOUT)",
+)
+target.write_text(text)
+
+collector = Path("/usr/local/lib/python3.12/site-packages/hcaptcha_challenger/agent/collector.py")
+text = collector.read_text()
+text = text.replace(
+    "self._captcha_payload_queue.get(), timeout=10\n",
+    "self._captcha_payload_queue.get(), timeout=float(os.getenv(\"HCAPTCHA_PAYLOAD_TIMEOUT\", \"60\"))\n",
+)
+collector.write_text(text)
+PY
 
 # 安装 Playwright 浏览器依赖
 RUN playwright install firefox && playwright install-deps firefox
@@ -66,7 +242,8 @@ RUN playwright install firefox && playwright install-deps firefox
 # 预装 Camoufox 浏览器 (避免每次运行时下载)
 RUN python3 -c "from camoufox.sync_api import Camoufox; Camoufox(headless=True).__enter__().__exit__(None, None, None)" || true
 
-# 复制 worker 脚本
+# 复制业务源码和 worker 脚本
+COPY app ./app
 COPY worker.py ./
 
 USER root

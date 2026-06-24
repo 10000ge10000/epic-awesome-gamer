@@ -9,6 +9,7 @@ import sys
 import asyncio
 import base64
 import json
+import random
 from pathlib import Path
 from typing import Any, List, Union
 
@@ -45,7 +46,7 @@ class EpicSettings(AgentConfig):
 
     # 覆盖父类的 GEMINI_API_KEY，使其变为可选（本项目通过兼容层调用模型）
     GEMINI_API_KEY: SecretStr | None = Field(
-        default=SecretStr(""),
+        default_factory=lambda: os.getenv("GEMINI_API_KEY", "not_used"),
         description="Gemini API Key（本项目无需配置）",
     )
 
@@ -64,11 +65,11 @@ class EpicSettings(AgentConfig):
 
     # === 验证码模型（需要视觉能力）===
     CAPTCHA_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-30B-A3B-Thinking"),
         description="验证码识别模型（主力）",
     )
     CAPTCHA_MODEL_FALLBACK: str = Field(
-        default=os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen3-VL-30B-A3B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen3.5-397B-A17B"),
         description="验证码识别模型（备用）",
     )
 
@@ -85,31 +86,49 @@ class EpicSettings(AgentConfig):
     # === hcaptcha-challenger 内置模型配置（必须覆盖默认值）===
     # 这些属性会覆盖 AgentConfig 的默认 gemini 模型名称
     CHALLENGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-30B-A3B-Thinking"),
         description="挑战分类模型",
     )
     IMAGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-30B-A3B-Thinking"),
         description="图像分类模型 (image_label_binary)",
     )
     SPATIAL_POINT_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-30B-A3B-Thinking"),
         description="空间点推理模型 (image_label_area_select)",
     )
     SPATIAL_PATH_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-30B-A3B-Thinking"),
         description="空间路径推理模型 (image_drag_drop)",
     )
 
-    EPIC_EMAIL: str = Field(default_factory=lambda: os.getenv("EPIC_EMAIL"))
-    EPIC_PASSWORD: SecretStr = Field(default_factory=lambda: os.getenv("EPIC_PASSWORD"))
+    EPIC_EMAIL: str = Field(default_factory=lambda: os.getenv("EPIC_EMAIL", ""))
+    EPIC_PASSWORD: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("EPIC_PASSWORD", ""))
+    )
     DISABLE_BEZIER_TRAJECTORY: bool = Field(default=True)
 
     # === hcaptcha-challenger 超时配置 ===
+    # 单次验证码处理总超时（秒）
+    EXECUTION_TIMEOUT: float = Field(
+        default=float(os.getenv("HCAPTCHA_EXECUTION_TIMEOUT", "180")),
+        description="验证码处理总超时时间（秒）",
+    )
+
     # 验证码响应超时（秒）
     RESPONSE_TIMEOUT: float = Field(
-        default=60.0,
+        default=float(os.getenv("HCAPTCHA_RESPONSE_TIMEOUT", "90")),
         description="验证码响应超时时间（秒）"
+    )
+
+    # Epic 结账页的 hCaptcha iframe 渲染有抖动，默认 1.5s 偏短。
+    WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS: int = Field(
+        default=int(os.getenv("HCAPTCHA_RENDER_WAIT_MS", "3000")),
+        description="等待验证码视图渲染的时间（毫秒）",
+    )
+    RETRY_ON_FAILURE: bool = Field(default=True)
+    enable_challenger_debug: bool = Field(
+        default=os.getenv("HCAPTCHA_DEBUG", "true").lower() in {"1", "true", "yes", "on"}
     )
 
     # 禁用 hcaptcha 文件保存（使用 /tmp 临时目录）
@@ -336,6 +355,14 @@ def _apply_openai_compatible_patch():
             if response_schema:
                 schema_json = response_schema.model_json_schema()
                 schema_str = json.dumps(schema_json, indent=2, ensure_ascii=False)
+                spatial_instruction = ""
+                if getattr(response_schema, "__name__", "") == "ImageAreaSelectChallenge":
+                    spatial_instruction = """
+坐标任务额外要求：
+- 使用图片上标注的 X/Y 坐标轴读数，不要使用图片像素尺寸。
+- 坐标必须落在目标物体的中心区域，不要点击边缘、空白、坐标轴或标题。
+- 先比较所有候选目标，再估算目标完整包围框的左、右、上、下边界。
+- 返回包围框的算术中心；花朵任务应点击花瓣汇聚的中心核心，绝不点击花瓣尖端。"""
                 schema_instruction = f"""你必须严格按照以下 JSON Schema 格式返回响应。
 返回的 JSON 必须包含在 ```json 代码块中。
 
@@ -344,7 +371,8 @@ JSON Schema:
 {schema_str}
 ```
 
-重要：请确保返回有效的 JSON 格式，包含在代码块中。"""
+重要：请确保返回有效的 JSON 格式，包含在代码块中。
+{spatial_instruction}"""
                 if final_messages and final_messages[0].get("role") == "system":
                     final_messages[0]["content"] += "\n\n" + schema_instruction
                 else:
@@ -360,16 +388,31 @@ JSON Schema:
                 # 注意：不使用 response_format，部分视觉模型不支持
             }
 
+            retryable_statuses = {429, 500, 502, 503, 504}
+            last_error = None
             async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(url, headers=headers, json=payload)
+                for attempt in range(1, 4):
+                    try:
+                        response = await client.post(url, headers=headers, json=payload)
+                        if response.status_code == 200:
+                            return response.json()
 
-                if response.status_code != 200:
-                    error_msg = f"API 调用失败: {response.status_code} - {response.text}"
-                    logger.error(f"❌ {error_msg}")
-                    raise Exception(error_msg)
+                        error_msg = f"API 调用失败: {response.status_code} - {response.text}"
+                        last_error = Exception(error_msg)
+                        logger.error(f"❌ {error_msg}")
+                        if response.status_code not in retryable_statuses or attempt == 3:
+                            raise last_error
+                    except httpx.HTTPError as exc:
+                        last_error = exc
+                        logger.error(f"❌ API 网络异常: {exc}")
+                        if attempt == 3:
+                            raise
 
-                result = response.json()
-                return result
+                    delay = min(2 ** (attempt - 1), 4) + random.uniform(0, 0.5)
+                    logger.warning(f"⏳ API 调用失败，{delay:.1f}s 后重试 [{attempt}/3]")
+                    await asyncio.sleep(delay)
+
+            raise last_error or RuntimeError("API 调用失败")
 
         # ==========================================
         # 劫持 Client 初始化
@@ -400,7 +443,7 @@ JSON Schema:
             'success_count': 0,       # 成功次数
             'failure_count': 0,       # 失败次数（通过调用频率推断）
         }
-        CAPTCHA_FAILURE_THRESHOLD = 2  # 连续调用超过此次数后切换备用模型
+        CAPTCHA_FAILURE_THRESHOLD = 4  # 为一次多步骤挑战保留同一主模型
         CAPTCHA_TIME_WINDOW = 60       # 时间窗口（秒），超过此时间重置计数
 
         async def patched_upload(self_files, file, **kwargs):

@@ -11,6 +11,8 @@ import socket
 import selectors
 import signal
 import traceback
+import queue
+import threading
 from contextlib import suppress
 from bs4 import BeautifulSoup
 
@@ -242,10 +244,10 @@ def ensure_warp_ready() -> bool:
     return False
 
 
-def restart_warp_for_captcha_retry(email: str) -> bool:
-    """验证码失败后按冷却时间重启 WARP，避免连续抖动代理。"""
+def restart_warp_for_retry(email: str, reason: str) -> bool:
+    """可恢复失败后按冷却时间重启 WARP，避免连续抖动代理。"""
     if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
-        print(f"ℹ️ [{email}] 未配置 WARP 代理，跳过验证码失败换 IP")
+        print(f"ℹ️ [{email}] 未配置 WARP 代理，跳过{reason}换 IP")
         return False
 
     now = time.time()
@@ -260,7 +262,7 @@ def restart_warp_for_captcha_retry(email: str) -> bool:
         except ValueError:
             pass
 
-    print(f"🔄 [{email}] 验证码失败，重启 WARP 换 IP")
+    print(f"🔄 [{email}] {reason}，重启 WARP 换 IP")
     ok = restart_warp_container()
     if ok:
         r.set("warp:last_restart_at", str(time.time()), ex=max(WARP_RESTART_COOLDOWN_SECONDS * 2, 3600))
@@ -282,6 +284,11 @@ def schedule_failure_retry(task_data: dict, error_type: str) -> bool:
             NETWORK_FAILURE_RETRY_DELAY_SECONDS,
             "网络连接超时",
         ),
+        "driver_crash": (
+            NETWORK_FAILURE_MAX_RETRIES,
+            NETWORK_FAILURE_RETRY_DELAY_SECONDS,
+            "浏览器驱动断连",
+        ),
     }
     if error_type not in policies:
         return False
@@ -297,7 +304,7 @@ def schedule_failure_retry(task_data: dict, error_type: str) -> bool:
         r.set(f"hint:{email}", f"{label}多次发生，请稍后手动重试", ex=3600)
         return False
 
-    restart_warp_for_captcha_retry(email)
+    restart_warp_for_retry(email, label)
 
     next_task = dict(task_data)
     next_task[retry_key] = retry_count + 1
@@ -608,6 +615,12 @@ ERROR_TYPE_MESSAGES = {
         "hint": "Epic 服务可能不可用，请稍后重试",
         "nuke": False,
     },
+    # 浏览器驱动断连，通常是 Playwright/Camoufox 与 Epic 页面或代理状态不稳定
+    "driver_crash": {
+        "status": "⚠️ 浏览器驱动断连",
+        "hint": "系统会稍后自动重试；若频繁出现，请联系管理员查看 Worker 日志",
+        "nuke": False,
+    },
     # Cookie 无效（下次执行时会自动重新登录，无需删除）
     "cookie_invalid": {
         "status": "⚠️ 登录已过期，请重新提交任务",
@@ -678,6 +691,10 @@ def summarize_game_results(game_results: dict[str, str]) -> tuple[list[str], lis
 
 def iter_process_output(process: subprocess.Popen, timeout_seconds: int):
     """Yield output without allowing a silent child process to run forever."""
+    if os.name == "nt":
+        yield from _iter_process_output_windows(process, timeout_seconds)
+        return
+
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     deadline = time.monotonic() + timeout_seconds
@@ -703,9 +720,62 @@ def iter_process_output(process: subprocess.Popen, timeout_seconds: int):
         selector.close()
 
 
+def _iter_process_output_windows(process: subprocess.Popen, timeout_seconds: int):
+    """Windows pipes are not selectable, so read stdout from a small helper thread."""
+    output_queue: queue.Queue[str | None] = queue.Queue()
+
+    def read_stdout() -> None:
+        try:
+            for line in process.stdout:
+                output_queue.put(line)
+        finally:
+            output_queue.put(None)
+
+    reader = threading.Thread(target=read_stdout, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout_seconds
+    stdout_closed = False
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate_process_group(process)
+            raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+
+        try:
+            line = output_queue.get(timeout=min(0.2, remaining))
+        except queue.Empty:
+            if process.poll() is not None and stdout_closed:
+                break
+            continue
+
+        if line is None:
+            stdout_closed = True
+            if process.poll() is not None:
+                break
+            continue
+
+        yield line
+
+
 def terminate_process_group(process: subprocess.Popen, grace_seconds: int = 5) -> None:
     """Terminate the browser task and every child process it spawned."""
     if process.poll() is not None:
+        return
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        with suppress(Exception):
+            process.wait(timeout=grace_seconds)
+            return
+        with suppress(Exception):
+            process.kill()
+            process.wait(timeout=grace_seconds)
         return
 
     try:
@@ -867,7 +937,8 @@ def run_task(task_data):
     try:
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=env, text=True, bufsize=1, start_new_session=True
+            env=env, text=True, encoding="utf-8", errors="replace",
+            bufsize=1, start_new_session=True
         )
 
         for line in iter_process_output(process, TASK_TIMEOUT_SECONDS):
@@ -929,6 +1000,8 @@ def run_task(task_data):
                 match = re.search(r"GAME_ERROR:(\w+)", line)
                 if match:
                     game_error = match.group(1)
+                    if game_error == "unknown_error" and final_error_type == "driver_crash":
+                        game_error = "driver_crash"
                     final_error_type = game_error
                     print(f"🎮 检测到游戏收集错误: {game_error}")
 
@@ -983,6 +1056,10 @@ def run_task(task_data):
                 r.set(f"status:{email}", "⚠️ 操作超时，重试中...", ex=3600)
                 has_critical_error = True
 
+            if "Connection closed while reading from the driver" in line or "playwright/driver" in line:
+                final_error_type = "driver_crash"
+                r.set(f"status:{email}", "⚠️ 浏览器驱动断连，准备延迟重试", ex=3600)
+
             # 验证码超时
             if "captcha response timeout" in line.lower() or "验证码响应超时" in line:
                 r.set(f"status:{email}", "⚠️ 验证码超时，重试中...", ex=3600)
@@ -1027,7 +1104,7 @@ def run_task(task_data):
         # 正常结束，执行常规瘦身
         clean_user_profile(email)
 
-        if final_error_type in {"captcha_failed", "network_timeout"} and not is_fatal_failure:
+        if final_error_type in {"captcha_failed", "network_timeout", "driver_crash"} and not is_fatal_failure:
             schedule_failure_retry(task_data, final_error_type)
             return
 
