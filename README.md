@@ -199,7 +199,6 @@ tail -50 data/logs/runtime-$(date +%Y-%m-%d).log
 
 - [快速开始](docs/QUICKSTART.md)
 - [模型配置](docs/MODEL_CONFIG.md)
-- [Oracle-1 运维说明](OPERATIONS.md)
 
 ## 许可证
 

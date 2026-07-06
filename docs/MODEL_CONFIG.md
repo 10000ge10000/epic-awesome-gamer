@@ -63,7 +63,6 @@ CAPTCHA_MODEL_FALLBACK=<vision-capable-fallback-model>
 - 包含图片的验证码任务使用 `CAPTCHA_MODEL`。
 - 验证码模型调用失败时，会尝试 `CAPTCHA_MODEL_FALLBACK`。
 - 非验证码流程判断使用 Compose 中配置的主力文本模型。
-- 验证码失败、网络超时和 Cookie 失效会进入不同的重试路径，详见 `README.md` 和 `OPERATIONS.md`。
 
 ## 安全要求
 
