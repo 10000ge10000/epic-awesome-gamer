@@ -1,106 +1,130 @@
-# 🚀 快速开始
+# 快速开始
 
-## 一键部署（仅需 1 条命令）
+本文面向首次部署用户。Epic Kiosk 通过 Docker Compose 运行 `web`、`worker`、`redis` 和 `warp` 服务。
 
-```bash
-# 设置 API Key 并一键部署
-export API_KEY="sk-你的Key"
-curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
-```
+## 前置条件
 
-脚本会自动完成：
-- ✅ 检测系统架构
-- ✅ 克隆项目代码
-- ✅ 配置 API Key
-- ✅ 本地编译镜像
-- ✅ 启动服务
+- Linux 服务器、VPS 或 NAS 主机。
+- 已安装 Docker 和 Docker Compose。
+- 准备一个 OpenAI-compatible API Key，用于验证码视觉识别。
 
----
+## 方式一：手动部署（推荐）
 
-## 手动部署（3 步）
+### 1. 克隆项目
 
-### 0️⃣ 准备 API Key
-
-访问 [SiliconFlow 官网](https://cloud.siliconflow.cn/i/OVI2n57p) 注册并获取 API Key。
-
-> 🆓 **为什么选择 SiliconFlow？**
-> - 主力模型 **Qwen2.5-7B-Instruct 完全免费**
-> - 验证码模型价格极低（¥0.5/百万 tokens）
-> - 国内访问速度快，无需科学上网
-> - 本项目专为该平台优化
->
-> 👉 **使用邀请链接注册，双方各得 ¥16 代金券**
-
-### 1️⃣ 克隆项目
 ```bash
 git clone https://github.com/10000ge10000/epic-kiosk.git
 cd epic-kiosk
 ```
 
-### 2️⃣ 配置 API Key
-编辑 `docker-compose.yml`，找到 `API_KEY` 配置项：
-```yaml
-- API_KEY=sk-你的Key  # 替换为你的 SiliconFlow API Key
+### 2. 创建 `.env`
+
+```bash
+cp .env.example .env
+nano .env
 ```
 
-### 3️⃣ 构建并启动
+推荐生产配置使用 NVIDIA：
+
+```env
+API_PROVIDER=nvidia
+API_BASE_URL=https://integrate.api.nvidia.com/v1
+API_KEY=<your-nvidia-api-key>
+CAPTCHA_MODEL=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_MODEL_FALLBACK=meta/llama-4-maverick-17b-128e-instruct
+```
+
+如果使用 SiliconFlow：
+
+```env
+API_PROVIDER=siliconflow
+API_BASE_URL=https://api.siliconflow.cn/v1
+API_KEY=<your-siliconflow-api-key>
+CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
+CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+```
+
+生成内部接口密钥，并写入 `.env`：
+
+```bash
+openssl rand -hex 32
+```
+
+```env
+INTERNAL_API_TOKEN=<random-64-character-hex>
+```
+
+### 3. 构建并启动
+
 ```bash
 docker compose up -d --build
 ```
 
-> ⏱️ 首次构建约需 5-10 分钟（下载依赖 + 编译镜像）
+首次构建会下载基础镜像和浏览器依赖，通常需要数分钟。
 
----
+### 4. 访问控制台
 
-## ✅ 访问控制台
-
-打开浏览器：`http://服务器IP:18000`
-
-在 Web 界面添加 Epic 账号，系统会自动处理后续所有流程。
-
----
-
-## 📝 说明
-
-- **无需配置文件**：所有配置都在 `docker-compose.yml` 中
-- **无需配置账号**：Epic 账号在 Web 界面添加
-- **模型已优化**：双模型自动切换，无需手动配置
-- **主力模型免费**：Qwen2.5-7B-Instruct 完全免费
-- **专属优化**：针对 SiliconFlow 平台优化
-
----
-
-## 🔍 查看日志
-
-```bash
-# 查看 Worker 日志
-docker logs epic-worker -f
-
-# 查看 Web 日志
-docker logs epic-web -f
-
-# 查看所有服务状态
-docker compose ps
+```text
+http://服务器IP:18000
 ```
 
----
+在 Web 页面提交 Epic 邮箱和密码，系统会验证登录、处理验证码，并将账号加入后续定时领取流程。
 
-## 🛑 停止服务
+## 方式二：Linux 一键部署
+
+一键脚本会自动安装依赖、克隆仓库、创建 `.env` 并启动服务。当前交互式流程默认按 SiliconFlow 兼容配置引导。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
+```
+
+如果你要使用 NVIDIA 或自定义 Provider，建议使用手动部署，直接编辑 `.env`。
+
+## 验证部署
+
+```bash
+docker compose ps
+docker exec epic-redis redis-cli LLEN task_queue
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18000/
+```
+
+预期结果：
+
+- `epic-web`、`epic-worker`、`epic-redis`、`epic-warp` 均处于运行状态。
+- Web HTTP 状态码为 `200`。
+- 新部署时队列长度通常为 `0`。
+
+## 查看日志
+
+```bash
+docker compose logs --tail=200 worker
+docker compose logs --tail=200 web
+```
+
+日志文件位于：
+
+```text
+data/logs/
+```
+
+## 更新项目
+
+```bash
+cd /opt/epic-kiosk   # 如果不是一键脚本部署，请进入你的实际项目目录
+git pull
+docker compose up -d --build
+```
+
+仅更新 Worker：
+
+```bash
+docker compose build worker && docker compose up -d worker
+```
+
+## 停止服务
 
 ```bash
 docker compose down
 ```
 
----
-
-## 🔄 更新项目
-
-```bash
-cd epic-kiosk
-git pull
-docker compose up -d --build
-```
-
----
-
-更多详细信息请查看 [README.md](../README.md)
+该命令不会删除 `data/`。不要在不了解影响时执行 `docker compose down -v`。

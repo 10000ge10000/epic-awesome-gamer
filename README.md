@@ -1,320 +1,217 @@
-# Epic Kiosk - 自动驾驶领取系统
+# Epic Kiosk
 
-![Docker](https://img.shields.io/badge/Docker-Enabled-blue?logo=docker)
+[![Blog](https://img.shields.io/badge/Blog-910501.xyz-orange)](https://blog.910501.xyz/)
+[![Bilibili](https://img.shields.io/badge/B%E7%AB%99-59438380-00a1d6?logo=bilibili)](https://space.bilibili.com/59438380)
+[![YouTube](https://img.shields.io/badge/YouTube-10000%20AI%20Share-ff0000?logo=youtube&logoColor=white)](https://www.youtube.com/channel/UCqgvZnCN9-9pZcL4SWxmnDw)
+![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)
 ![Python](https://img.shields.io/badge/Python-3.12-yellow?logo=python)
-![Status](https://img.shields.io/badge/Status-Stable-green)
-![License](https://img.shields.io/badge/License-GPL--3.0-blue)
 
-基于 Docker 的 Epic Games 免费游戏自动领取工具，支持多账号托管、智能验证码识别、错峰调度。
+Epic Kiosk 是一个基于 Docker 的 Epic Games 每周免费游戏自动领取服务，支持多账号托管、验证码自动处理、队列调度和多 WARP 出口。
 
 > 公益站点：[https://epic.910501.xyz/](https://epic.910501.xyz/)
 
 <p align="center">
-  <img src="assets/image_2.png" alt="Epic Kiosk Dashboard" width="100%" style="max-width: 800px;">
+  <img src="assets/dashboard.png" alt="Epic Kiosk Dashboard" width="100%" style="max-width: 920px;">
 </p>
 
----
+## 特性
 
-## 核心功能
-
-| 功能 | 说明 |
-|------|------|
-| 自动驾驶 | 一键启动，自动完成登录、验证码识别、免费游戏领取 |
-| Cookie 托管 | 首次登录后保存 Cookie，后续尽量复用登录态 |
-| AI 验证码 | 使用 SiliconFlow 视觉模型识别 hCaptcha |
-| 错峰调度 | 随机延迟执行，降低多账号同时触发风控概率 |
-| 防滥用保护 | IP 限流 + 恶意账号检测 |
-| 一键部署 | Docker Compose 本地编译，支持 x86_64 / ARM64 |
-
----
+- **多账号托管**：在 Web 控制台提交 Epic 邮箱和密码，后续由 Worker 自动处理登录与领取。
+- **验证码处理**：通过 OpenAI-compatible API 调用视觉模型处理 hCaptcha，并支持外部验证码服务商兜底。
+- **多游戏流程**：本周免费游戏有多个时，单个游戏失败不会中断整轮任务，失败项会延迟补跑。
+- **队列调度**：Redis 管理任务队列、任务锁、延迟重试和每日自动调度。
+- **多 WARP 出口**：单个 `epic-warp` 容器提供 10 个内部 WARP 实例，Worker 按账号稳定分配代理出口。
+- **Docker 部署**：`web`、`worker`、`redis`、`warp` 四个服务通过 Docker Compose 本地构建和运行。
 
 ## 快速开始
 
-### 方式一：Linux 一键部署
+### 手动部署（推荐）
 
-适用于云服务器、VPS、Linux 主机：
+适合 NVIDIA、SiliconFlow 或其他 OpenAI-compatible API 提供商。
+
+```bash
+git clone https://github.com/10000ge10000/epic-kiosk.git
+cd epic-kiosk
+cp .env.example .env
+nano .env
+```
+
+推荐生产配置使用 NVIDIA OpenAI-compatible API：
+
+```env
+API_PROVIDER=nvidia
+API_BASE_URL=https://integrate.api.nvidia.com/v1
+API_KEY=<your-nvidia-api-key>
+CAPTCHA_MODEL=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_MODEL_FALLBACK=meta/llama-4-maverick-17b-128e-instruct
+INTERNAL_API_TOKEN=<run-openssl-rand-hex-32>
+```
+
+生成内部接口密钥：
+
+```bash
+openssl rand -hex 32
+```
+
+启动服务：
+
+```bash
+docker compose up -d --build
+```
+
+访问控制台：
+
+```text
+http://服务器IP:18000
+```
+
+### Linux 一键部署
+
+一键脚本适合快速部署，并会交互式写入 `.env`。当前脚本默认按 SiliconFlow 兼容配置引导；如果使用 NVIDIA 或自定义 OpenAI-compatible 服务，建议使用上面的手动部署流程。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
 ```
 
-脚本功能：
-
-- 自动检测系统架构（x86_64 / ARM64）
-- 自动安装 Docker 和 Docker Compose
-- 交互式引导配置 SiliconFlow API Key
-- 自动克隆项目并启动服务
-
-首次部署约需 5-10 分钟。
-
-### 方式二：手动部署
-
-适用于已有 Docker 环境的 Linux / macOS / Windows 主机。
-
-**1. 克隆项目**
-
-```bash
-git clone https://github.com/10000ge10000/epic-kiosk.git
-cd epic-kiosk
-```
-
-**2. 配置 SiliconFlow API Key**
-
-推荐使用 `.env`，不要把真实 key 写进 `docker-compose.yml`：
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-`.env` 示例：
-
-```env
-API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-API_BASE_URL=https://api.siliconflow.cn/v1
-INTERNAL_API_TOKEN=使用-openssl-rand-hex-32-生成
-```
-
-执行 `openssl rand -hex 32` 生成 `INTERNAL_API_TOKEN`。该值只用于 web 与 worker
-之间的内部接口认证，不能与 `API_KEY` 共用。
-
-SiliconFlow key 获取地址：
-
-- 推荐使用分享链接：[https://cloud.siliconflow.cn/i/OVI2n57p](https://cloud.siliconflow.cn/i/OVI2n57p)
-
-通过该分享链接注册并完成认证后，邀请双方可获得 16 元代金券。登录 SiliconFlow 后进入 API Key 管理页，创建并复制 `sk-` 开头的 key。
-
-**3. 启动**
-
-```bash
-docker compose up -d --build
-```
-
-首次启动约需 5-10 分钟。
-
----
-
-## 部署注意事项
-
-1. 默认 Web 端口是 `18000`，访问地址为 `http://服务器IP:18000`。
-2. 默认 AI 提供商是 SiliconFlow，接口地址为 `https://api.siliconflow.cn/v1`。
-3. `API_KEY` 必须放在 `.env`，`.env` 已被 `.gitignore` 忽略。
-4. `INTERNAL_API_TOKEN` 必须是独立随机值，一键安装脚本会自动生成。
-5. 旧版 `SILICONFLOW_API_KEY` / `SILICONFLOW_BASE_URL` 仍可兼容读取，新部署统一使用 `API_KEY` / `API_BASE_URL`。
-6. WARP 容器负责访问 Epic Games；如果 Epic 风控严重，可能需要更稳定的住宅代理或更换出口。
-
----
-
-## 使用说明
-
-### 添加账号
-
-1. 输入 Epic 邮箱和密码。
-2. 点击「启动引擎」。
-3. 系统自动处理登录、验证码和免费游戏领取。
-
-### 查看资产
-
-- 点击「资产清单」Tab 查看已领取游戏。
-- 点击游戏封面跳转 Epic 商店。
-
-### 删除账号
-
-- 输入密码后点击红色删除按钮。
-- 系统将清除数据库记录和本地 Cookie 数据。
-
----
-
 ## 配置说明
 
-### AI 模型配置
+### API Provider
 
-当前默认配置基于 SiliconFlow 实测结果：
+项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。当前生产实测推荐 NVIDIA，SiliconFlow 和自建兼容网关也可以通过 `.env` 接入。
 
-| 类型 | 主模型 | 备用模型 | 用途 |
-|------|--------|----------|------|
-| 主力文本 | `deepseek-ai/DeepSeek-V4-Flash` | `deepseek-ai/DeepSeek-V4-Pro` | 页面判断、流程决策、结构化文本输出 |
-| 验证码视觉 | `Qwen/Qwen3-VL-30B-A3B-Thinking` | `Qwen/Qwen3.5-397B-A17B` | hCaptcha 空间推理；主模型连续失败后切换到实测更快的备用模型 |
+| Provider | API_BASE_URL | 说明 |
+| --- | --- | --- |
+| `nvidia` | `https://integrate.api.nvidia.com/v1` | 当前生产推荐，用于 hCaptcha 视觉识别。 |
+| `siliconflow` | `https://api.siliconflow.cn/v1` | 兼容部署路径，一键脚本默认引导。 |
+| `custom` | 自定义 `/v1` 地址 | 适合自建 OpenAI-compatible 网关。 |
 
-相关环境变量：
+核心环境变量：
 
 ```env
-API_PROVIDER=siliconflow
-API_BASE_URL=https://api.siliconflow.cn/v1
-PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
-PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
-CAPTCHA_MODEL=Qwen/Qwen3-VL-30B-A3B-Thinking
-CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3.5-397B-A17B
-ENABLE_APSCHEDULER=true
-DAILY_SCHEDULE_LOCK_SECONDS=86400
+API_PROVIDER=nvidia
+API_BASE_URL=https://integrate.api.nvidia.com/v1
+API_KEY=<your-provider-api-key>
+INTERNAL_API_TOKEN=<random-64-character-hex>
+CAPTCHA_MODEL=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_MODEL_FALLBACK=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_PROVIDER=none
 ```
 
-智能切换机制：
+`INTERNAL_API_TOKEN` 只用于 `web` 与 `worker` 的内部接口认证，必须是独立随机值，不能与模型 API Key 共用。
 
-- 验证码连续调用超过阈值后自动切换备用视觉模型。
-- API 调用异常时自动使用对应备用模型重试一次。
-- 视觉请求和文本请求会按是否包含图片自动选择不同模型。
-- 验证码失败会触发 WARP 换 IP，并将账号放入延迟队列，默认 15 分钟后重试，最多 2 次。
-- 网络超时默认延迟 10 分钟重试，最多 2 次。
-- 结账只有在成功页、支付框关闭或商品页显示已入库时才会记录为成功。
-- 每日自动调度必须显式设置 `ENABLE_APSCHEDULER=true`，并通过 Redis 日锁保证同一天只有一个 Web 实例安排任务；临时预览 Web 容器不要开启，避免重复入队。
-- Docker 容器日志和应用文件日志均按 1 MB 自动轮转，避免长期运行撑满磁盘。
+### WARP 出口
 
-### 费用与额度
+当前 Compose 使用单容器多 WARP 架构：
 
-SiliconFlow hosted API 的额度和价格以 SiliconFlow 当前账号页面为准。不同账号、地区、模型和活动政策可能不同，部署前应在 SiliconFlow 控制台确认可用额度。
+```text
+epic-warp:19000-19009
+控制接口：http://epic-warp:18080/restart/{idx}
+实例数量：10
+```
 
----
+Worker 会根据账号邮箱稳定选择一个 WARP index，并把 `HTTP_PROXY` / `HTTPS_PROXY` 注入本次浏览器任务。网络超时或浏览器驱动异常时，系统优先重启对应 index，而不是重启整个 WARP 容器。
 
-## 项目结构
+### 任务恢复
+
+- 验证码失败：默认延迟 15 分钟重试，最多 2 次。
+- 网络超时：默认延迟 10 分钟重试，最多 2 次。
+- Cookie 失效：清理该账号浏览器 profile 后立即重试，默认 1 次。
+- 多游戏领取：成功游戏先入库，失败游戏进入一次延迟补跑。
+
+## 使用方法
+
+1. 打开 Web 控制台。
+2. 输入 Epic 邮箱和密码。
+3. 点击「启动引擎」。
+4. 系统验证登录、处理验证码，并把账号加入后续定时任务。
+5. 在「资产」和「本周免费」页面查看领取记录和当前免费游戏。
+
+删除托管账号时需要重新输入密码确认。删除后会清除数据库记录和对应浏览器 profile。
+
+## 目录结构
 
 ```text
 epic-kiosk/
-├── app/                    # 核心代码
-│   ├── main.py             # FastAPI 后端
-│   ├── deploy.py           # 浏览器自动化
-│   ├── settings.py         # 模型/API 配置与 OpenAI 兼容补丁
-│   └── services/           # 业务逻辑
-├── templates/              # 前端页面
-├── data/                   # 持久化数据
-│   ├── images/             # 游戏海报
-│   ├── user_data/          # 用户 Cookie / 浏览器 profile
-│   └── logs/               # 日志文件
+├── app/                    # FastAPI 后端、自动化和业务服务
+├── templates/              # Web 页面模板
+├── data/                   # SQLite、浏览器 profile、图片和日志
+├── docs/                   # 部署与模型配置文档
 ├── worker.py               # Redis 队列 Worker
-├── docker-compose.yml      # 容器编排
-├── install.sh              # 一键部署脚本
+├── docker-compose.yml      # Docker Compose 编排
 ├── Dockerfile              # Web 镜像
-└── Dockerfile.worker       # Worker 镜像
+├── Dockerfile.worker       # Worker 镜像
+└── install.sh              # Linux 一键部署脚本
 ```
 
----
+## 安全说明
 
-## 安全机制
+- 为了定时自动登录，Epic 密码会保存在本机 `data/kiosk.db`，不要把 `data/` 同步到公开仓库、公共网盘或不可信备份。
+- `.env` 不应提交到 Git；其中包含模型 API Key 和 `INTERNAL_API_TOKEN`。
+- 日志、截图、Issue、PR 中不要公开 API Key、Cookie、Token、Epic 密码或完整生产配置。
+- 对外开放 Web 控制台前，应额外配置反向代理访问控制、面板鉴权或防火墙白名单。
 
-### IP 保护
+## 升级
 
-- 1 分钟内最多 3 次请求。
-- 超限后临时封禁 1 小时。
-- 同一 IP 提交超过 5 个不同账号将永久封禁。
-
-### 账号保护
-
-- 同一邮箱任务互斥。
-- 已存储账号需验证密码。
-- Worker 内部删除和领取记录接口使用共享 token 鉴权。
-- 浏览器只有持有本次任务的一次性确认 token 才能保存账号。
-- 自动清理浏览器缓存。
-
-### 密码存储说明
-
-- 当前版本为了定时自动登录，会将 Epic 密码明文保存在本机 `data/kiosk.db`。
-- 不要将 `data/` 目录同步到公开仓库、公共网盘或不可信备份。
-- 建议限制宿主机和管理面板访问权限，并定期检查备份权限。
-- 删除托管账号会同时删除数据库记录和对应浏览器 profile。
-
-### Key 安全
-
-- 不要把 `API_KEY` 写进 Git 跟踪文件。
-- 不要公开 `INTERNAL_API_TOKEN`，也不要让它与模型 API Key 相同。
-- 不要把 `sk-` key 发到公开聊天、Issue、日志或截图里。
-- 如果 key 泄露，应立即在 SiliconFlow 后台删除并重新生成。
-
----
-
-## 版本升级
-
-已部署用户升级到最新版本：
+Oracle-1 生产实例默认路径：
 
 ```bash
-cd /epic-kiosk
+cd /opt/epic-kiosk
 git pull
 docker compose up -d --build
 ```
 
-仅升级 Worker：
+普通手动部署用户请进入自己的项目目录后执行同样命令。
+
+仅重建 Worker：
 
 ```bash
 docker compose build worker && docker compose up -d worker
 ```
-
----
 
 ## 故障排查
 
-### 常见问题
-
-**Q: 日志提示 `未配置 API_KEY`？**
-
-A: 检查 `.env` 是否存在，且包含 `API_KEY=sk-...`。修改后执行 `docker compose up -d worker`。
-
-**Q: SiliconFlow API 返回 401 / 403？**
-
-A: key 无效、过期、权限不足或账号额度不可用。通过 [SiliconFlow 分享链接](https://cloud.siliconflow.cn/i/OVI2n57p) 登录后进入 API Key 管理页重新生成 key。
-
-**Q: SiliconFlow API 返回 404？**
-
-A: 通常是模型 ID 不存在或该账号无权使用该模型。先通过 [SiliconFlow 分享链接](https://cloud.siliconflow.cn/i/OVI2n57p) 登录控制台确认模型可用。
-
-**Q: 验证码一直失败？**
-
-A: 先检查 worker 日志中是否出现 `调用 OpenAI 兼容 API`、模型名和 API 错误码；如果没有 API 错误，重点排查 WARP 出口 IP、Epic 风控、验证码类型是否变化。
-
-**Q: 按钮显示 `Requires Base Game`？**
-
-A: 该游戏需要先拥有基础游戏，属于 DLC，跳过即可。
-
-**Q: 日志显示「游戏已在库中」？**
-
-A: 该账号已领取过此游戏，正常现象。
-
-### 查看日志
+查看服务状态：
 
 ```bash
-# Worker 日志（实时）
-docker logs epic-worker --tail 50 -f
+docker compose ps
+docker exec epic-redis redis-cli LLEN task_queue
+```
 
-# 日志文件（按日期分类）
+查看日志：
+
+```bash
+docker compose logs --tail=200 worker
+docker compose logs --tail=200 web
 ls data/logs/
-
-# 查看当天运行时日志
-cat data/logs/runtime-$(date +%Y-%m-%d).log | tail -50
-
-# 查看当天错误日志
-cat data/logs/error-$(date +%Y-%m-%d).log
+tail -50 data/logs/runtime-$(date +%Y-%m-%d).log
 ```
 
-### 重新构建
+常见问题：
 
-```bash
-# 仅重新构建 Worker
-docker compose build worker && docker compose up -d worker
-
-# 重新构建所有服务
-docker compose build --no-cache && docker compose up -d
-```
-
----
+- `未配置 API_KEY`：检查 `.env` 是否存在，且 `API_KEY` 不是空值或示例占位符。
+- API 返回 `401` / `403`：Key 无效、额度不可用或 Provider 权限不足。
+- API 返回 `404`：模型 ID 不存在，或当前账号无权调用该模型。
+- 验证码一直失败：先看 Worker 日志中的模型名、API 错误码和 WARP 重启记录，再判断是模型能力、Provider 权限还是 Epic 风控。
+- `Requires Base Game`：该免费项是 DLC，需要先拥有基础游戏，系统会跳过或记录失败原因。
 
 ## 相关文档
 
-- [快速开始指南](docs/QUICKSTART.md)
-- [模型配置说明](docs/MODEL_CONFIG.md)
+- [快速开始](docs/QUICKSTART.md)
+- [模型配置](docs/MODEL_CONFIG.md)
+- [Oracle-1 运维说明](OPERATIONS.md)
 
-> 注意：部分旧文档可能仍保留历史 SiliconFlow 配置说明，当前 README 和 `.env.example` 以 SiliconFlow 配置为准。
+## 许可证
 
----
+`pyproject.toml` 声明本项目使用 `GPL-3.0-or-later`。当前仓库尚未包含独立 `LICENSE` 文件，建议后续补充完整许可证文本。
 
 ## 致谢
 
 - 原项目：[QIN2DIM/epic-awesome-gamer](https://github.com/QIN2DIM/epic-awesome-gamer)
-- AI 服务：[SiliconFlow 分享链接](https://cloud.siliconflow.cn/i/OVI2n57p)
-
----
+- OpenAI-compatible Provider：NVIDIA、SiliconFlow 及其他兼容服务
 
 ## 免责声明
 
 本项目仅供学习和技术研究使用。请合理使用，遵守 Epic Games 服务条款。开发者不对因使用本项目导致的任何损失承担责任。
-
----
 
 *Created by [一万](https://github.com/10000ge10000) | 公益站点：[epic.910501.xyz](https://epic.910501.xyz/)*

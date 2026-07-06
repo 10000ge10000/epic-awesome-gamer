@@ -1,162 +1,83 @@
-# 🤖 AI 模型配置说明
+# AI 模型配置
 
-## 📋 双模型架构
+Epic Kiosk 使用 OpenAI-compatible API 处理文本判断和 hCaptcha 视觉识别。项目内部会把自动化流程中的模型调用转换为 `/v1/chat/completions` 请求，因此 Provider 只要兼容该接口即可接入。
 
-本项目采用**智能双模型**策略，针对不同任务场景使用不同的 AI 模型，并具备自动故障切换能力。
+## 推荐配置
 
----
+### NVIDIA（当前生产推荐）
 
-## 🎯 主力模型（Primary Model）
-
-### 用途
-处理除验证码外的所有任务，包括：
-- 页面元素识别
-- 按钮定位
-- 流程判断
-- 文本理解
-
-### 配置
-```python
-主模型: Qwen/Qwen2.5-7B-Instruct（免费）
-备用模型: Qwen/Qwen2.5-72B-Instruct
+```env
+API_PROVIDER=nvidia
+API_BASE_URL=https://integrate.api.nvidia.com/v1
+API_KEY=<your-nvidia-api-key>
+CAPTCHA_MODEL=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_MODEL_FALLBACK=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_API_TIMEOUT=60
+HCAPTCHA_EXECUTION_TIMEOUT=240
+HCAPTCHA_RESPONSE_TIMEOUT=120
+HCAPTCHA_PAYLOAD_TIMEOUT=90
 ```
 
-### 切换逻辑
-```
-Qwen2.5-7B-Instruct 调用失败
-    ↓
-自动切换到 Qwen2.5-72B-Instruct
-    ↓
-记录日志并继续执行
-```
+适用场景：验证码视觉识别稳定性优先，生产部署优先使用。
 
----
+### SiliconFlow（兼容部署）
 
-## 🔐 验证码模型（Captcha Model）
-
-### 用途
-专门处理 hCaptcha 验证码识别任务：
-- 图像分类
-- 物体识别
-- 验证码破解
-
-### 配置
-```python
-主模型: Qwen/Qwen2.5-VL-32B-Instruct
-备用模型: Qwen/Qwen2.5-VL-72B-Instruct
+```env
+API_PROVIDER=siliconflow
+API_BASE_URL=https://api.siliconflow.cn/v1
+API_KEY=<your-siliconflow-api-key>
+CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
+CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+CAPTCHA_API_TIMEOUT=60
 ```
 
-### 切换逻辑
-```
-Qwen2.5-VL-32B-Instruct 调用失败
-    ↓
-自动切换到 Qwen2.5-VL-72B-Instruct
-    ↓
-记录日志并继续执行
-```
+适用场景：使用一键脚本或已有 SiliconFlow 账号。具体模型可用性和价格以 Provider 控制台为准。
 
----
+### 自定义 OpenAI-compatible 网关
 
-## ⚙️ 技术实现
-
-### 模型自动识别任务类型
-系统会根据 API 调用的 `contents` 参数自动判断：
-- **包含图片数据** → 使用验证码模型
-- **纯文本请求** → 使用主力模型
-
----
-
-## 📊 模型对比
-
-| 模型名称 | 类型 | 价格 | 适用场景 |
-|---------|------|------|---------|
-| deepseek-ai/DeepSeek-V4-Flash | 文本 | 以 SiliconFlow 控制台为准 | 主力文本模型，实测速度优先 |
-| deepseek-ai/DeepSeek-V4-Pro | 文本 | 以 SiliconFlow 控制台为准 | 备用文本模型，质量兜底 |
-| Qwen/Qwen3-VL-32B-Instruct | 视觉 | 以 SiliconFlow 控制台为准 | 验证码识别主模型 |
-| Qwen/Qwen3-VL-30B-A3B-Instruct | 视觉 | 以 SiliconFlow 控制台为准 | 验证码识别备用模型 |
-
----
-
-## 🔧 配置位置
-
-### 模型配置
-
-默认模型配置在 `app/settings.py` 中，也可以通过 `.env` 或 `docker-compose.yml` 环境变量覆盖：
-
-```python
-# 主力模型配置
-PRIMARY_MODEL: str = Field(default="deepseek-ai/DeepSeek-V4-Flash")
-PRIMARY_MODEL_FALLBACK: str = Field(default="deepseek-ai/DeepSeek-V4-Pro")
-
-# 验证码模型配置
-CAPTCHA_MODEL: str = Field(default="Qwen/Qwen3-VL-32B-Instruct")
-CAPTCHA_MODEL_FALLBACK: str = Field(default="Qwen/Qwen3-VL-30B-A3B-Instruct")
+```env
+API_PROVIDER=custom
+API_BASE_URL=https://your-gateway.example.com/v1
+API_KEY=<your-provider-api-key>
+CAPTCHA_MODEL=<vision-capable-model>
+CAPTCHA_MODEL_FALLBACK=<vision-capable-fallback-model>
 ```
 
-**注意**: 这些配置已经过优化测试，建议不要修改。
+自定义网关必须支持图片输入，并返回兼容 OpenAI Chat Completions 的响应结构。
 
-### 🔑 API Key 配置（唯一需要修改）
+## 关键环境变量
 
-在 `docker-compose.yml` 中修改：
+| 变量 | 作用 |
+| --- | --- |
+| `API_PROVIDER` | 日志和部署标识，例如 `nvidia`、`siliconflow`、`custom`。 |
+| `API_BASE_URL` | OpenAI-compatible API 根地址，通常以 `/v1` 结尾。 |
+| `API_KEY` | Provider API Key，只能写入 `.env`。 |
+| `CAPTCHA_MODEL` | 验证码视觉识别主模型。 |
+| `CAPTCHA_MODEL_FALLBACK` | 验证码视觉识别备用模型。 |
+| `CAPTCHA_API_TIMEOUT` | 单次验证码模型请求超时时间。 |
+| `CAPTCHA_PROVIDER` | 外部验证码服务商兜底，默认 `none`。 |
+| `INTERNAL_API_TOKEN` | Web 与 Worker 内部接口共享密钥，必须独立随机生成。 |
 
-```yaml
-environment:
-  - API_KEY=sk-xxx  # 修改为你的 SiliconFlow API Key
-```
+## 模型选择逻辑
 
-**重要说明**：
-- ✅ 仅支持 [SiliconFlow](https://cloud.siliconflow.cn/i/OVI2n57p) 的 API Key
-- 🎁 使用邀请链接注册可获 ¥16 代金券
+- 包含图片的验证码任务使用 `CAPTCHA_MODEL`。
+- 验证码模型调用失败时，会尝试 `CAPTCHA_MODEL_FALLBACK`。
+- 非验证码流程判断使用 Compose 中配置的主力文本模型。
+- 验证码失败、网络超时和 Cookie 失效会进入不同的重试路径，详见 `README.md` 和 `OPERATIONS.md`。
 
----
+## 安全要求
 
-## 💰 费用估算
+- 不要把 `API_KEY`、`CAPTCHA_PROVIDER_API_KEY` 或 `INTERNAL_API_TOKEN` 写入 Git 跟踪文件。
+- 不要在日志、截图、Issue 或 PR 中公开完整 `.env`。
+- 切换 Provider 后需要重建并重启 Worker：
 
-| 项目 | 价格 | 说明 |
-|------|------|------|
-| 主力模型 | 以控制台为准 | deepseek-ai/DeepSeek-V4-Flash |
-| 验证码模型 | 以控制台为准 | Qwen/Qwen3-VL-32B-Instruct |
-| ¥16 代金券 | ≈ **1500+ 次任务** | 每次任务约 ¥0.01 |
-
----
-
-## 📝 日志示例
-
-### 正常运行
-```
-🎯 API 提供商: siliconflow
-🔐 验证码模型: Qwen/Qwen2.5-VL-32B-Instruct (备用: Qwen/Qwen2.5-VL-72B-Instruct)
-🤖 主力模型: Qwen/Qwen2.5-7B-Instruct (备用: Qwen/Qwen2.5-72B-Instruct)
-```
-
-### 自动切换
-```
-❌ 主力模型 Qwen2.5-7B-Instruct 故障，自动切换到 Qwen2.5-72B-Instruct
-⚠️ 主力模型已切换到备用
-```
-
----
-
-## ❓ 常见问题
-
-### Q: 可以使用其他 API 提供商吗？
-A: 本项目针对 SiliconFlow 优化，如需使用其他提供商，需修改 API 地址和模型配置。
-
-### Q: 可以手动指定模型吗？
-A: 不建议。当前配置已经过充分测试，能够应对各种场景。
-
-### Q: 如果备用模型也失败了怎么办？
-A: 系统会抛出异常并记录详细日志，建议检查 API Key 和网络连接。
-
-### Q: 如何查看当前使用的模型？
-A: 查看容器日志：
 ```bash
-docker logs epic-worker -f
+docker compose build worker && docker compose up -d worker
 ```
 
----
+## 排查建议
 
-## 🔗 相关文档
-
-- [SiliconFlow 官网（邀请链接）](https://cloud.siliconflow.cn/i/OVI2n57p) - 注册双方可获 ¥16 代金券
-- [项目主 README](../README.md)
+- `401` / `403`：Key 无效、权限不足、账号额度不可用。
+- `404`：模型 ID 不存在，或当前账号没有调用权限。
+- 请求超时：提高 `CAPTCHA_API_TIMEOUT`，同时检查 WARP 出口和 Provider 网络质量。
+- 识别失败：优先更换视觉模型，再考虑启用外部验证码服务商兜底。

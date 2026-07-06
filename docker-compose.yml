@@ -10,7 +10,7 @@
 #   2. 手动部署: 克隆项目 → 修改 API Key → docker compose up -d --build
 #
 # ⚠️ 必须修改: API_KEY
-#    获取地址: https://cloud.siliconflow.cn/i/OVI2n57p
+#    Configure it in .env; NVIDIA, SiliconFlow, and custom OpenAI-compatible providers are supported.
 #
 # 📦 镜像说明：
 #   - redis:alpine - 官方镜像，直接拉取
@@ -148,18 +148,11 @@ services:
       # 内部服务不走代理（修复入库 API 失败问题）
       - NO_PROXY=web,epic-web,redis,epic-redis,localhost,127.0.0.1
       # ============================================================
-      # ⚠️⚠️⚠️ 必须配置 API Key ⚠️⚠️⚠️
+      # API Key must be configured in .env.
+      # Supports NVIDIA, SiliconFlow, or custom OpenAI-compatible providers.
+      # Do not commit real keys in docker-compose.yml.
       # ============================================================
-      # 方式一：直接修改下方环境变量（不推荐，会暴露在配置文件中）
-      # 方式二：创建 .env 文件，添加 API_KEY=sk-xxx（推荐）
-      # ============================================================
-      # 获取步骤：
-      # 1. 访问分享链接 https://cloud.siliconflow.cn/i/OVI2n57p
-      # 2. 登录 SiliconFlow 账号
-      # 3. 进入 API Key 管理页创建新密钥；通过分享链接注册认证后，双方可获得 16 元代金券
-      # 4. 复制 sk- 开头的 API Key
-      # ============================================================
-      - API_KEY=${API_KEY:-sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+      - API_KEY=${API_KEY:?set API_KEY in .env}
       # 环境变量（绕过父类验证器，无需修改）
       - GEMINI_API_KEY=not_used
       # ============================================================
