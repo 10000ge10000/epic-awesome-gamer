@@ -244,6 +244,10 @@ RUN python3 -c "from camoufox.sync_api import Camoufox; Camoufox(headless=True).
 
 # 复制业务源码和 worker 脚本
 COPY app ./app
+# 显式覆盖关键验证码/登录模块，避免增量构建遗漏新目录或旧缓存残留
+COPY app/settings.py ./app/settings.py
+COPY app/services/epic_authorization_service.py ./app/services/epic_authorization_service.py
+COPY app/services/captcha ./app/services/captcha
 COPY worker.py ./
 
 USER root

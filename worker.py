@@ -13,6 +13,7 @@ import signal
 import traceback
 import queue
 import threading
+import hashlib
 from contextlib import suppress
 from bs4 import BeautifulSoup
 
@@ -39,7 +40,9 @@ PATHS_TO_CHECK = [
 # 🌐 WARP 代理配置
 # ============================================================
 WARP_PROXY_HOST = os.getenv("WARP_PROXY_HOST", "epic-warp")
-WARP_PROXY_PORT = int(os.getenv("WARP_PROXY_PORT", "19000"))
+WARP_PROXY_START_PORT = int(os.getenv("WARP_PROXY_START_PORT", os.getenv("WARP_PROXY_PORT", "19000")))
+WARP_PROXY_COUNT = max(1, int(os.getenv("WARP_PROXY_COUNT", "1")))
+WARP_CONTROL_URL_TEMPLATE = os.getenv("WARP_CONTROL_URL_TEMPLATE", "").strip()
 WARP_MAX_RETRIES = 5  # 最大重启次数
 EPIC_TEST_URL = "https://store.epicgames.com/en-US/"
 EPIC_TEST_TIMEOUT = 10  # 秒
@@ -52,6 +55,7 @@ CAPTCHA_FAILURE_MAX_RETRIES = int(os.getenv("CAPTCHA_FAILURE_MAX_RETRIES", "2"))
 CAPTCHA_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("CAPTCHA_FAILURE_RETRY_DELAY_SECONDS", "900"))
 NETWORK_FAILURE_MAX_RETRIES = int(os.getenv("NETWORK_FAILURE_MAX_RETRIES", "2"))
 NETWORK_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("NETWORK_FAILURE_RETRY_DELAY_SECONDS", "600"))
+COOKIE_INVALID_MAX_RETRIES = int(os.getenv("COOKIE_INVALID_MAX_RETRIES", "1"))
 WARP_RESTART_COOLDOWN_SECONDS = int(os.getenv("WARP_RESTART_COOLDOWN_SECONDS", "300"))
 TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "5"))
 PID_WARN_THRESHOLD = int(os.getenv("PID_WARN_THRESHOLD", "250"))
@@ -125,39 +129,43 @@ def log_worker_boot_info() -> None:
     log_worker_runtime_health("startup")
 
 
-def check_warp_proxy() -> tuple[bool, str]:
-    """
-    检测 WARP 代理是否可用
+def get_warp_index_for_email(email: str | None) -> int:
+    if WARP_PROXY_COUNT <= 1:
+        return 0
+    seed = (email or "").strip().lower().encode("utf-8")
+    digest = hashlib.sha256(seed).digest()
+    return int.from_bytes(digest[:4], "big") % WARP_PROXY_COUNT
 
-    只检测代理连通性和出口 IP，不检测 Epic Games
-    因为 Epic 有 Cloudflare 挑战，需要浏览器才能通过
 
-    Returns:
-        tuple[bool, str]: (是否成功, 错误信息或IP地址)
+def get_warp_proxy_port(idx: int) -> int:
+    return WARP_PROXY_START_PORT + idx
+
+
+def get_warp_proxy_url(idx: int) -> str:
+    return f"http://{WARP_PROXY_HOST}:{get_warp_proxy_port(idx)}"
+
+
+def check_warp_proxy(idx: int = 0) -> tuple[bool, str]:
     """
-    proxy_url = f"http://{WARP_PROXY_HOST}:{WARP_PROXY_PORT}"
-    proxies = {
-        "http": proxy_url,
-        "https": proxy_url
-    }
+    检测指定 WARP 出口是否可用。
+
+    只检测代理连通性和出口 IP，不检测 Epic Games；Epic 有 Cloudflare 挑战，需浏览器验证。
+    """
+    proxy_port = get_warp_proxy_port(idx)
+    proxy_url = get_warp_proxy_url(idx)
+    proxies = {"http": proxy_url, "https": proxy_url}
 
     try:
-        # 1. 先检测代理是否可达（TCP 连接）
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
-        result = sock.connect_ex((WARP_PROXY_HOST, WARP_PROXY_PORT))
+        result = sock.connect_ex((WARP_PROXY_HOST, proxy_port))
         sock.close()
 
         if result != 0:
-            return False, f"WARP 代理端口不可达: {WARP_PROXY_HOST}:{WARP_PROXY_PORT}"
+            return False, f"WARP 代理端口不可达: {WARP_PROXY_HOST}:{proxy_port}"
 
-        # 2. 检测是否可以获取出口 IP（简单测试代理是否工作）
         try:
-            ip_resp = requests.get(
-                "https://api.ipify.org",
-                proxies=proxies,
-                timeout=10
-            )
+            ip_resp = requests.get("https://api.ipify.org", proxies=proxies, timeout=10)
             if ip_resp.status_code == 200:
                 ip = ip_resp.text.strip()
                 return True, ip
@@ -173,36 +181,31 @@ def check_warp_proxy() -> tuple[bool, str]:
         return False, str(e)[:50]
 
 
-def restart_warp_container() -> bool:
-    """
-    重启 WARP 容器以获取新 IP
+def restart_warp_container(idx: int = 0) -> bool:
+    """重启指定 WARP 出口；多实例优先调用控制接口，失败时回退整容器重启。"""
+    if WARP_CONTROL_URL_TEMPLATE:
+        url = WARP_CONTROL_URL_TEMPLATE.format(idx=idx, index=idx, port=get_warp_proxy_port(idx))
+        try:
+            resp = requests.post(url, timeout=120)
+            if resp.status_code == 200:
+                print(f"🔄 WARP 出口已重启: index={idx} port={get_warp_proxy_port(idx)}")
+                return True
+            print(f"❌ WARP 出口重启失败: index={idx} status={resp.status_code} body={resp.text[:200]}")
+        except Exception as e:
+            print(f"❌ WARP 出口重启异常: index={idx} error={e}")
 
-    Returns:
-        bool: 是否成功重启
-    """
     try:
-        # 使用 docker 命令重启容器
-        result = subprocess.run(
-            ["docker", "restart", "epic-warp"],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-
+        result = subprocess.run(["docker", "restart", "epic-warp"], capture_output=True, text=True, timeout=180)
         if result.returncode == 0:
             print(f"🔄 WARP 容器已重启: {result.stdout.strip()}")
-            # 等待容器恢复健康
             time.sleep(15)
             return True
-        else:
-            print(f"❌ WARP 容器重启失败: {result.stderr}")
-            return False
-
+        print(f"❌ WARP 容器重启失败: {result.stderr}")
+        return False
     except subprocess.TimeoutExpired:
         print("❌ WARP 容器重启超时")
         return False
     except FileNotFoundError:
-        # docker 命令不存在，尝试使用 Docker API
         print("⚠️ docker 命令不可用，跳过重启")
         return False
     except Exception as e:
@@ -210,7 +213,7 @@ def restart_warp_container() -> bool:
         return False
 
 
-def ensure_warp_ready() -> bool:
+def ensure_warp_ready(warp_index: int = 0) -> bool:
     """
     确保 WARP 代理可用，必要时重启换 IP
 
@@ -222,10 +225,10 @@ def ensure_warp_ready() -> bool:
         print("ℹ️ 未配置 WARP 代理，跳过检测")
         return True
 
-    print(f"🔍 检测 WARP 代理: {WARP_PROXY_HOST}:{WARP_PROXY_PORT}")
+    print(f"🔍 检测 WARP 代理: {WARP_PROXY_HOST}:{get_warp_proxy_port(warp_index)} [index={warp_index}]")
 
     for attempt in range(1, WARP_MAX_RETRIES + 1):
-        success, info = check_warp_proxy()
+        success, info = check_warp_proxy(warp_index)
 
         if success:
             print(f"✅ WARP 代理可用 - 出口 IP: {info}")
@@ -235,7 +238,7 @@ def ensure_warp_ready() -> bool:
 
         if attempt < WARP_MAX_RETRIES:
             print(f"🔄 正在重启 WARP 容器换 IP...")
-            if restart_warp_container():
+            if restart_warp_container(warp_index):
                 print(f"✅ WARP 已重启，等待恢复...")
             else:
                 print(f"❌ WARP 重启失败，继续尝试...")
@@ -244,14 +247,15 @@ def ensure_warp_ready() -> bool:
     return False
 
 
-def restart_warp_for_retry(email: str, reason: str) -> bool:
+def restart_warp_for_retry(email: str, reason: str, warp_index: int = 0) -> bool:
     """可恢复失败后按冷却时间重启 WARP，避免连续抖动代理。"""
     if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
         print(f"ℹ️ [{email}] 未配置 WARP 代理，跳过{reason}换 IP")
         return False
 
     now = time.time()
-    last_restart = r.get("warp:last_restart_at")
+    restart_key = f"warp:last_restart_at:{warp_index}"
+    last_restart = r.get(restart_key)
     if last_restart:
         try:
             elapsed = now - float(last_restart)
@@ -263,14 +267,52 @@ def restart_warp_for_retry(email: str, reason: str) -> bool:
             pass
 
     print(f"🔄 [{email}] {reason}，重启 WARP 换 IP")
-    ok = restart_warp_container()
+    ok = restart_warp_container(warp_index)
     if ok:
-        r.set("warp:last_restart_at", str(time.time()), ex=max(WARP_RESTART_COOLDOWN_SECONDS * 2, 3600))
-        ensure_warp_ready()
+        r.set(restart_key, str(time.time()), ex=max(WARP_RESTART_COOLDOWN_SECONDS * 2, 3600))
+        ensure_warp_ready(warp_index)
     return ok
 
 
-def schedule_failure_retry(task_data: dict, error_type: str) -> bool:
+def reset_profile_for_retry(email: str) -> int:
+    """删除该账号的本地浏览器 profile，清理失效 Cookie/CSRF 状态。"""
+    removed = 0
+    for base_dir in PATHS_TO_CHECK:
+        profile_path = os.path.join(base_dir, email)
+        if not os.path.exists(profile_path):
+            continue
+        try:
+            shutil.rmtree(profile_path)
+            removed += 1
+            print(f"🧹 [{email}] 已清理失效浏览器 profile: {profile_path}")
+        except Exception as exc:
+            print(f"⚠️ [{email}] 清理浏览器 profile 失败: {profile_path} - {exc}")
+    return removed
+
+
+def schedule_cookie_invalid_retry(task_data: dict) -> bool:
+    email = task_data.get("email", "")
+    retry_count = int(task_data.get("cookie_invalid_retry_count", 0))
+    if retry_count >= COOKIE_INVALID_MAX_RETRIES:
+        print(f"🛑 [{email}] Cookie/CSRF 重试已达上限: {retry_count}/{COOKIE_INVALID_MAX_RETRIES}")
+        r.set(f"status:{email}", "❌ 登录状态失效，重试后仍失败", ex=3600)
+        r.set(f"result:{email}", "error_cookie_invalid", ex=3600)
+        r.set(f"hint:{email}", "本地登录态已清理但 Epic 仍拒绝登录，请稍后重新提交或联系管理员", ex=3600)
+        return False
+
+    reset_profile_for_retry(email)
+    next_task = dict(task_data)
+    next_task["cookie_invalid_retry_count"] = retry_count + 1
+    r.rpush("task_queue", json.dumps(next_task, ensure_ascii=False))
+    r.setex(f"task_lock:{email}", TASK_TIMEOUT_SECONDS + 300, "queued_cookie_reset")
+    r.set(f"status:{email}", "🧹 登录状态失效，已清理本地 Cookie 并立即重试", ex=3600)
+    r.set(f"result:{email}", "retry_scheduled", ex=3600)
+    r.set(f"hint:{email}", "系统已清理该账号本地浏览器 profile，正在重新登录", ex=3600)
+    print(f"🔁 [{email}] Cookie/CSRF 失效，已清理 profile 并重新入队 [{retry_count + 1}/{COOKIE_INVALID_MAX_RETRIES}]")
+    return True
+
+
+def schedule_failure_retry(task_data: dict, error_type: str, warp_index: int | None = None) -> bool:
     """把可恢复失败放入 Redis 延迟队列，并限制重试次数和节奏。"""
     email = task_data.get("email", "")
     policies = {
@@ -304,7 +346,9 @@ def schedule_failure_retry(task_data: dict, error_type: str) -> bool:
         r.set(f"hint:{email}", f"{label}多次发生，请稍后手动重试", ex=3600)
         return False
 
-    restart_warp_for_retry(email, label)
+    if warp_index is None:
+        warp_index = get_warp_index_for_email(email)
+    restart_warp_for_retry(email, label, warp_index)
 
     next_task = dict(task_data)
     next_task[retry_key] = retry_count + 1
@@ -594,7 +638,13 @@ ERROR_TYPE_MESSAGES = {
     # 验证码识别失败
     "captcha_failed": {
         "status": "⚠️ 验证码识别困难",
-        "hint": "请稍后重试",
+        "hint": "系统已停止本次高风险验证码会话，请稍后重试或联系管理员人工处理",
+        "nuke": False,
+    },
+    # 验证码需要人工处理
+    "captcha_manual_required": {
+        "status": "⚠️ 需要人工完成验证码",
+        "hint": "Epic 触发了 hCaptcha 动物拖拽题，系统已停止自动重试以避免账号风控，请联系管理员人工完成一次登录",
         "nuke": False,
     },
     # 验证码已通过，但 Epic 结账结果无法可靠确认
@@ -900,7 +950,9 @@ def run_task(task_data):
     password = task_data.get("password")
     mode = task_data.get("mode")
 
-    print(f"🚀 接到任务: {mode} - {email}")
+    warp_index = get_warp_index_for_email(email)
+    warp_port = get_warp_proxy_port(warp_index)
+    print(f"🚀 接到任务: {mode} - {email} | WARP index={warp_index} port={warp_port}")
     r.set(f"status:{email}", "🚀 初始化环境...", ex=3600)
 
     # ============================================================
@@ -908,7 +960,7 @@ def run_task(task_data):
     # 领取前先检测 WARP 是否可以访问 Epic Games
     # 如果不通则重启 WARP 容器换 IP，最多尝试 5 次
     # ============================================================
-    if not ensure_warp_ready():
+    if not ensure_warp_ready(warp_index):
         r.set(f"status:{email}", "❌ 网络代理不可用", ex=3600)
         r.set(f"result:{email}", "warp_unavailable", ex=3600)
         r.set(f"hint:{email}", "WARP 代理无法连接 Epic Games，请联系管理员", ex=3600)
@@ -919,6 +971,8 @@ def run_task(task_data):
     env["EPIC_EMAIL"] = email
     env["EPIC_PASSWORD"] = password
     env["ENABLE_APSCHEDULER"] = "false"
+    env["HTTP_PROXY"] = get_warp_proxy_url(warp_index)
+    env["HTTPS_PROXY"] = get_warp_proxy_url(warp_index)
 
     cmd = ["xvfb-run", "-a", "python3", "app/deploy.py"]
 
@@ -1104,8 +1158,12 @@ def run_task(task_data):
         # 正常结束，执行常规瘦身
         clean_user_profile(email)
 
-        if final_error_type in {"captcha_failed", "network_timeout", "driver_crash"} and not is_fatal_failure:
-            schedule_failure_retry(task_data, final_error_type)
+        if final_error_type == "cookie_invalid" and not is_fatal_failure:
+            schedule_cookie_invalid_retry(task_data)
+            return
+
+        if final_error_type in {"network_timeout", "driver_crash"} and not is_fatal_failure:
+            schedule_failure_retry(task_data, final_error_type, warp_index)
             return
 
         if return_code != 0 and not final_error_type:
@@ -1121,10 +1179,22 @@ def run_task(task_data):
             if failed_games or report_failures or (
                 final_error_type and final_error_type not in {"success", "all_owned"}
             ):
-                r.set(f"status:{email}", "⚠️ 部分游戏领取失败", ex=3600)
-                r.set(f"result:{email}", "error_unknown_error", ex=3600)
                 failure_parts = failed_games + report_failures
                 failure_detail = ", ".join(failure_parts) or final_error_type
+                partial_retry_count = int(task_data.get("partial_game_retry_count", 0))
+                if failed_games and not report_failures and partial_retry_count < 1:
+                    retry_task = dict(task_data)
+                    retry_task["partial_game_retry_count"] = partial_retry_count + 1
+                    if schedule_failure_retry(retry_task, "captcha_failed"):
+                        r.set(f"status:{email}", "⚠️ 部分游戏领取失败，已安排自动补跑", ex=3600)
+                        r.set(
+                            f"hint:{email}",
+                            f"已成功记录本轮已领取游戏，失败游戏稍后自动补跑: {failure_detail}",
+                            ex=3600,
+                        )
+                        return
+                r.set(f"status:{email}", "⚠️ 部分游戏领取失败", ex=3600)
+                r.set(f"result:{email}", "error_unknown_error", ex=3600)
                 r.set(
                     f"hint:{email}",
                     f"失败详情: {failure_detail}",

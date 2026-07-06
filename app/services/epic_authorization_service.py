@@ -15,9 +15,14 @@ from hcaptcha_challenger.agent import AgentV
 from loguru import logger
 from playwright.async_api import expect, Page, Response
 
-from settings import settings
+from settings import RUNTIME_DIR, settings
+from services.captcha import HCaptchaChallengerSolver
+from services.captcha.solver import CaptchaSolveStatus, TwoCaptchaTokenSolver, inject_hcaptcha_token
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
+LOGIN_FAST_RESULT_TIMEOUT = 15
+LOGIN_AFTER_CAPTCHA_TIMEOUT = 60
+LOGIN_AFTER_RESUBMIT_TIMEOUT = 45
 
 
 class ErrorType(Enum):
@@ -43,6 +48,9 @@ class ErrorType(Enum):
 
     # 验证码识别失败/超时 - 建议用户稍后重试
     CAPTCHA_FAILED = "captcha_failed"
+
+    # 验证码需要人工处理 - hCaptcha 动物拖拽题自动识别不稳定
+    CAPTCHA_MANUAL_REQUIRED = "captcha_manual_required"
 
     # 登录超时 - 可能是网络问题，建议稍后重试
     LOGIN_TIMEOUT = "login_timeout"
@@ -78,6 +86,193 @@ class EpicAuthorization:
         self._is_refresh_csrf_signal = asyncio.Queue()
         self._login_error_code = None  # 存储登录错误码
 
+    async def _save_login_debug(self, reason: str):
+        """保存登录失败现场，便于排查 Epic/hCaptcha 页面变化。"""
+        safe_reason = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in reason) or "unknown"
+        debug_dir = RUNTIME_DIR.joinpath("login_debug")
+        with suppress(Exception):
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = int(time.time())
+
+        with suppress(Exception):
+            screenshot_path = debug_dir.joinpath(f"{timestamp}_{safe_reason}.png")
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            logger.warning(f"🧾 已保存登录失败截图: {screenshot_path}")
+
+        with suppress(Exception):
+            html_path = debug_dir.joinpath(f"{timestamp}_{safe_reason}.html")
+            html_path.write_text(await self.page.content(), encoding="utf-8")
+            logger.warning(f"🧾 已保存登录失败 HTML: {html_path}")
+
+        with suppress(Exception):
+            frames_path = debug_dir.joinpath(f"{timestamp}_{safe_reason}_frames.json")
+            frames = [
+                {"index": idx, "name": frame.name, "url": frame.url}
+                for idx, frame in enumerate(self.page.frames)
+            ]
+            frames_path.write_text(json.dumps(frames, indent=2, ensure_ascii=False), encoding="utf-8")
+            logger.warning(f"🧾 已保存登录 frame 列表: {frames_path}")
+
+    async def _has_visible_hcaptcha_challenge(self, timeout_ms: int = 1000) -> bool:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            for frame in self.page.frames:
+                url = frame.url or ""
+                if "hcaptcha.com" not in url or "frame=challenge" not in url:
+                    continue
+                with suppress(Exception):
+                    if await frame.locator("div.challenge-view").first.is_visible(timeout=500):
+                        return True
+                with suppress(Exception):
+                    if await frame.locator("div.challenge-view").count() > 0:
+                        return True
+            await self.page.wait_for_timeout(250)
+        return False
+
+    async def _click_hcaptcha_checkbox(self) -> bool:
+        """点击 hCaptcha checkbox，显式触发 challenge/getcaptcha。"""
+        checkbox_selectors = [
+            "#checkbox",
+            "div#checkbox",
+            "[role='checkbox']",
+            ".checkbox",
+        ]
+
+        for frame in self.page.frames:
+            url = frame.url or ""
+            if "hcaptcha.com" not in url or "frame=checkbox" not in url:
+                continue
+            for selector in checkbox_selectors:
+                with suppress(Exception):
+                    checkbox = frame.locator(selector).first
+                    if not await checkbox.is_visible(timeout=1000):
+                        continue
+                    await checkbox.click(force=True, timeout=5000)
+                    logger.info("✅ 已点击 hCaptcha checkbox，等待 challenge")
+                    return True
+        return False
+
+    async def _prepare_hcaptcha_challenge(self, agent: AgentV, timeout_ms: int = 20000) -> None:
+        """
+        登录页不会总是自动打开 challenge。
+
+        先点击 checkbox 触发 getcaptcha，再交给 AgentV 解题；不要在 challenge
+        不可见时直接 refresh_challenge，否则会点击隐藏刷新按钮并报
+        "Element is not visible or does not exist"。
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        checkbox_clicked = False
+
+        while time.monotonic() < deadline:
+            if not agent._captcha_payload_queue.empty():
+                logger.info("✅ 已捕获 hCaptcha payload")
+                return
+            if await self._has_visible_hcaptcha_challenge(timeout_ms=500):
+                logger.info("✅ 已检测到可见 hCaptcha challenge")
+                return
+            if not checkbox_clicked:
+                checkbox_clicked = await self._click_hcaptcha_checkbox()
+            await self.page.wait_for_timeout(1000)
+
+        logger.warning("⚠️ 等待 hCaptcha challenge/payload 超时，继续交给 AgentV 兜底处理")
+
+    async def _is_animal_pattern_drag_challenge(self) -> bool:
+        needle = "put the animal icons into the correct spots to complete the pattern"
+        for frame in self.page.frames:
+            url = frame.url or ""
+            if "hcaptcha.com" not in url or "frame=challenge" not in url:
+                continue
+            with suppress(Exception):
+                content = (await frame.content()).lower()
+                if needle in content:
+                    return True
+        return False
+
+    async def _resubmit_login_if_password_page(self, reason: str) -> bool:
+        """
+        hCaptcha 处理结束后，Epic 有时会回到密码页但不会自动提交。
+
+        这种状态下继续判定验证码失败是错误的：页面已经脱离 challenge，
+        正确动作是补一次登录提交，然后继续等待 Epic 登录回调。
+        """
+        try:
+            if await self._has_visible_hcaptcha_challenge(timeout_ms=500):
+                logger.debug("Skip password-page resubmit because hCaptcha challenge is still visible")
+                return False
+
+            password_input = self.page.locator("#password").first
+            sign_in_button = self.page.locator("#sign-in").first
+
+            if not await password_input.is_visible(timeout=1500):
+                return False
+            if not await sign_in_button.is_visible(timeout=1500):
+                return False
+
+            with suppress(Exception):
+                await self.page.evaluate(
+                    """
+                    () => {
+                      const button = document.querySelector('#sign-in');
+                      if (button) {
+                        button.disabled = false;
+                        button.removeAttribute('disabled');
+                        button.removeAttribute('aria-disabled');
+                        button.tabIndex = 0;
+                      }
+                      const talonOverlay = document.querySelector('#talon_container_login_prod');
+                      if (talonOverlay) {
+                        talonOverlay.style.display = 'none';
+                        talonOverlay.style.visibility = 'hidden';
+                      }
+                    }
+                    """
+                )
+
+            with suppress(Exception):
+                current_password = await password_input.input_value(timeout=1000)
+                if not current_password:
+                    await password_input.fill(settings.EPIC_PASSWORD.get_secret_value(), timeout=5000)
+
+            with suppress(Exception):
+                await sign_in_button.scroll_into_view_if_needed(timeout=1000)
+
+            try:
+                await sign_in_button.click(timeout=5000)
+            except Exception:
+                await self.page.click("#sign-in", timeout=5000)
+
+            logger.warning(f"Captcha flow returned to password page; resubmitted sign-in ({reason})")
+            return True
+        except Exception as err:
+            logger.debug(f"Password-page resubmit check skipped: {err}")
+            return False
+
+    async def _solve_with_provider(self) -> bool:
+        provider = (settings.CAPTCHA_PROVIDER or "none").lower()
+        if provider in {"", "none", "disabled"}:
+            return False
+        if provider != "2captcha":
+            logger.warning(f"Unsupported captcha provider: {provider}")
+            return False
+
+        api_key = settings.CAPTCHA_PROVIDER_API_KEY.get_secret_value()
+        solver = TwoCaptchaTokenSolver(
+            api_key=api_key,
+            site_key=settings.CAPTCHA_PROVIDER_SITE_KEY,
+            page_url=self.page.url or "https://www.epicgames.com/id/login",
+            timeout_seconds=settings.CAPTCHA_PROVIDER_TIMEOUT,
+            poll_interval_seconds=settings.CAPTCHA_PROVIDER_POLL_INTERVAL,
+        )
+        result = await solver.solve()
+        if not result.ok or not result.token:
+            logger.warning(f"Captcha provider failed: {result.provider} {result.status} {result.message}")
+            return False
+
+        await inject_hcaptcha_token(self.page, result.token)
+        logger.success(f"Captcha provider returned token: {result.provider}")
+        return True
+
     async def _on_response_anything(self, r: Response):
         if r.request.method != "POST" or "talon" in r.url:
             return
@@ -109,13 +304,35 @@ class EpicAuthorization:
             elif "/account/v2/refresh-csrf" in r.url and result.get("success", False) is True:
                 self._is_refresh_csrf_signal.put_nowait(result)
 
+    def _map_login_error(self, error_code: str) -> ErrorType:
+        if "invalid_account_credentials" in error_code:
+            return ErrorType.INVALID_CREDENTIALS
+        if "account_locked" in error_code:
+            return ErrorType.ACCOUNT_LOCKED
+        if "csrf_token_invalid" in error_code:
+            return ErrorType.COOKIE_INVALID
+        return ErrorType.UNKNOWN
+
     async def _handle_right_account_validation(self):
         """
         以下验证仅会在登录成功后出现
         Returns:
 
         """
-        await self.page.goto("https://www.epicgames.com/account/personal", wait_until="networkidle")
+        try:
+            await self.page.goto(
+                "https://www.epicgames.com/account/personal",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            with suppress(Exception):
+                await self.page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception as exc:
+            current_url = self.page.url or ""
+            if "epicgames.com/account/personal" in current_url:
+                logger.warning(f"Account validation navigation timed out but account page is visible: {exc}")
+            else:
+                raise
 
         btn_ids = ["#link-success", "#login-reminder-prompt-setup-tfa-skip", "#yes"]
 
@@ -131,6 +348,30 @@ class EpicAuthorization:
                     await reminder_btn.click(timeout=1000)
                     btn_ids.remove(action)
 
+    async def _confirm_login_state_from_page(self, reason: str) -> bool:
+        """
+        Epic can finish navigation after hCaptcha without emitting the login API
+        response that this flow is waiting for. In that case the account page
+        itself is the strongest success signal.
+        """
+        with suppress(Exception):
+            await self.page.wait_for_load_state("networkidle", timeout=10000)
+
+        current_url = self.page.url or ""
+        if "epicgames.com/account/personal" in current_url:
+            logger.success(f"Epic account page reached after {reason}; treating login as successful")
+            with suppress(Exception):
+                await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
+            return True
+
+        with suppress(Exception):
+            status = await self.page.locator("//egs-navigation").get_attribute("isloggedin", timeout=3000)
+            if str(status).lower() == "true":
+                logger.success(f"Epic navigation reports logged-in after {reason}")
+                return True
+
+        return False
+
     async def _login(self) -> tuple[bool, ErrorType] | None:
         """
         执行登录流程
@@ -141,6 +382,7 @@ class EpicAuthorization:
             - (False, ErrorType.INVALID_CREDENTIALS): 账号或密码错误
             - (False, ErrorType.ACCOUNT_LOCKED): 账号被锁定
             - (False, ErrorType.CAPTCHA_FAILED): 验证码识别失败
+            - (False, ErrorType.CAPTCHA_MANUAL_REQUIRED): 验证码需要人工处理
             - (False, ErrorType.LOGIN_TIMEOUT): 登录超时
             - None: 异常情况
         """
@@ -179,6 +421,9 @@ class EpicAuthorization:
             # 4. 点击登录按钮
             await self.page.click("#sign-in")
 
+            # 先注册 hCaptcha 响应监听器，避免 getcaptcha payload 在首轮等待期间丢失。
+            agent = AgentV(page=self.page, agent_config=settings)
+
             # 并行启动：验证码处理 + 登录结果等待
             # 关键改进：使用 wait_for 快速检测密码错误
             async def wait_for_login_result():
@@ -186,17 +431,56 @@ class EpicAuthorization:
                 return await self._is_login_success_signal.get()
 
             async def handle_captcha():
-                """处理验证码（如果需要）"""
+                """Solve captcha through a provider wrapper.
+
+                The login flow consumes solver status only. This prevents the
+                Epic login code from hard-looping inside one high-risk captcha
+                session and makes manual/provider fallback explicit.
+                """
                 nonlocal captcha_success
                 try:
                     assert agent is not None
-                    if agent._captcha_payload_queue.empty():
-                        await agent.robotic_arm.refresh_challenge()
-                    await agent.wait_for_challenge()
-                    captcha_success = True
+                    await self._prepare_hcaptcha_challenge(agent)
+
+                    original_response_timeout = float(settings.RESPONSE_TIMEOUT)
+                    original_execution_timeout = float(settings.EXECUTION_TIMEOUT)
+                    if await self._is_animal_pattern_drag_challenge():
+                        settings.RESPONSE_TIMEOUT = max(original_response_timeout, 120.0)
+                        settings.EXECUTION_TIMEOUT = max(original_execution_timeout, 240.0)
+                        logger.warning(
+                            f"Detected hCaptcha animal drag pattern; extending timeouts "
+                            f"response={settings.RESPONSE_TIMEOUT}s execution={settings.EXECUTION_TIMEOUT}s"
+                        )
+
+                    solver = HCaptchaChallengerSolver(agent)
+                    try:
+                        result = await solver.solve()
+                    finally:
+                        settings.RESPONSE_TIMEOUT = original_response_timeout
+                        settings.EXECUTION_TIMEOUT = original_execution_timeout
+
+                    if result.ok:
+                        captcha_success = True
+                        logger.success("Captcha solver succeeded")
+                        return result
+
+                    provider_ok = await self._solve_with_provider()
+                    if provider_ok:
+                        captcha_success = True
+                        return type("CaptchaProviderResult", (), {"ok": True, "status": CaptchaSolveStatus.SUCCESS, "signal": "provider", "message": ""})()
+
+                    if result.status in {CaptchaSolveStatus.RETRY, CaptchaSolveStatus.TIMEOUT}:
+                        logger.warning(f"Captcha requires retry or manual fallback: {result.signal or result.message}")
+                        await self._save_login_debug("captcha_manual_required")
+                        return result
+                    else:
+                        logger.warning(f"Captcha solver failed: {result.signal or result.message}")
+                        await self._save_login_debug("captcha_failed")
+                        return result
                 except Exception as e:
-                    logger.warning(f"验证码处理异常: {e}")
-                    pass  # 验证码处理失败不影响登录结果判断
+                    logger.warning(f"Captcha solver exception: {e}")
+                    await self._save_login_debug("captcha_exception")
+                    return type("CaptchaExceptionResult", (), {"ok": False, "status": CaptchaSolveStatus.FAILED, "signal": None, "message": str(e)})()
 
             # 先只等待登录 API；大多数账号不需要启动验证码 Agent。
             result_task = asyncio.create_task(wait_for_login_result())
@@ -205,7 +489,7 @@ class EpicAuthorization:
             try:
                 done, pending = await asyncio.wait(
                     [result_task],
-                    timeout=15,
+                    timeout=LOGIN_FAST_RESULT_TIMEOUT,
                     return_when=asyncio.FIRST_COMPLETED
                 )
 
@@ -214,15 +498,16 @@ class EpicAuthorization:
                     # 检查是否是登录失败信号
                     if result.get("error"):
                         error_code = result.get("code", "")
-                        if "invalid_account_credentials" in error_code:
+                        mapped_error = self._map_login_error(error_code)
+                        if mapped_error == ErrorType.INVALID_CREDENTIALS:
                             logger.error("❌ 账号或密码错误")
-                            return (False, ErrorType.INVALID_CREDENTIALS)
-                        elif "account_locked" in error_code:
+                        elif mapped_error == ErrorType.ACCOUNT_LOCKED:
                             logger.error("❌ 账号已被锁定")
-                            return (False, ErrorType.ACCOUNT_LOCKED)
+                        elif mapped_error == ErrorType.COOKIE_INVALID:
+                            logger.error("❌ 登录 Cookie/CSRF 已失效，需要清理浏览器 profile 后重试")
                         else:
                             logger.error(f"❌ 登录失败: {error_code}")
-                            return (False, ErrorType.UNKNOWN)
+                        return (False, mapped_error)
 
                     # 登录成功（无验证码或已通过）
                     if result.get("accountId"):
@@ -233,35 +518,105 @@ class EpicAuthorization:
             except asyncio.CancelledError:
                 pass
 
-            # 第二阶段：首轮未登录才启动验证码处理，并继续等待结果。
-            agent = AgentV(page=self.page, agent_config=settings)
+            # Second phase: start captcha solver and wait for login or solver result.
             captcha_task = asyncio.create_task(handle_captcha())
             try:
-                result = await asyncio.wait_for(result_task, timeout=60)
+                captcha_login_timeout = (
+                    float(settings.EXECUTION_TIMEOUT)
+                    + float(settings.RESPONSE_TIMEOUT)
+                    + 60
+                )
+                logger.info(f"Waiting for login or captcha result, timeout: {captcha_login_timeout:.0f}s")
+                done, _pending = await asyncio.wait(
+                    [result_task, captcha_task],
+                    timeout=captcha_login_timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if not done:
+                    logger.error("Captcha/login wait timed out")
+                    await self._save_login_debug("captcha_timeout")
+                    return (False, ErrorType.CAPTCHA_FAILED)
+
+                if result_task in done:
+                    result = result_task.result()
+                elif captcha_task in done:
+                    captcha_result = captcha_task.result()
+                    if not captcha_result or not captcha_result.ok:
+                        resubmitted = await self._resubmit_login_if_password_page(
+                            f"captcha_{getattr(captcha_result, 'status', 'unknown')}"
+                        )
+                        if resubmitted:
+                            try:
+                                result = await asyncio.wait_for(
+                                    result_task,
+                                    timeout=LOGIN_AFTER_RESUBMIT_TIMEOUT,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.error("Epic login response timed out after password-page resubmit")
+                                await self._save_login_debug("login_timeout_after_resubmit")
+                                return (False, ErrorType.CAPTCHA_FAILED)
+                        else:
+                            logger.error("Captcha solver ended without success; manual verification is required")
+                            return (False, ErrorType.CAPTCHA_MANUAL_REQUIRED)
+                    else:
+                        captcha_success = True
+                        try:
+                            result = await asyncio.wait_for(
+                                result_task,
+                                timeout=LOGIN_AFTER_CAPTCHA_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            resubmitted = await self._resubmit_login_if_password_page("captcha_success_no_login_response")
+                            if not resubmitted:
+                                if await self._confirm_login_state_from_page("captcha_success_no_login_response"):
+                                    return (True, ErrorType.SUCCESS)
+                                logger.error("Captcha passed but Epic login response timed out")
+                                await self._save_login_debug("login_timeout_after_captcha")
+                                return (False, ErrorType.LOGIN_TIMEOUT)
+                            try:
+                                result = await asyncio.wait_for(
+                                    result_task,
+                                    timeout=LOGIN_AFTER_RESUBMIT_TIMEOUT,
+                            )
+                            except asyncio.TimeoutError:
+                                if await self._confirm_login_state_from_page("captcha_success_resubmit"):
+                                    return (True, ErrorType.SUCCESS)
+                                logger.error("Epic login response timed out after captcha success resubmit")
+                                await self._save_login_debug("login_timeout_after_captcha_resubmit")
+                                return (False, ErrorType.LOGIN_TIMEOUT)
+                else:
+                    logger.error("Captcha/login wait ended without a usable task result")
+                    await self._save_login_debug("captcha_login_wait_empty")
+                    return (False, ErrorType.LOGIN_TIMEOUT)
 
                 if result.get("error"):
                     error_code = result.get("code", "")
-                    if "invalid_account_credentials" in error_code:
-                        logger.error("❌ 账号或密码错误")
-                        return (False, ErrorType.INVALID_CREDENTIALS)
-                    elif "account_locked" in error_code:
-                        logger.error("❌ 账号已被锁定")
-                        return (False, ErrorType.ACCOUNT_LOCKED)
+                    mapped_error = self._map_login_error(error_code)
+                    if mapped_error == ErrorType.INVALID_CREDENTIALS:
+                        logger.error("Invalid Epic credentials")
+                    elif mapped_error == ErrorType.ACCOUNT_LOCKED:
+                        logger.error("Epic account is locked")
+                    elif mapped_error == ErrorType.COOKIE_INVALID:
+                        logger.error("Epic login Cookie/CSRF is invalid; browser profile reset is required")
                     else:
-                        logger.error(f"❌ 登录失败: {error_code}")
-                        return (False, ErrorType.UNKNOWN)
+                        logger.error(f"Epic login failed: {error_code}")
+                    return (False, mapped_error)
 
-                logger.success("✅ 登录成功")
+                logger.success("Epic login succeeded")
                 await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
-                logger.success("✅ 账号验证成功")
+                logger.success("Epic account validation succeeded")
                 return (True, ErrorType.SUCCESS)
 
             except asyncio.TimeoutError:
-                # 判断是验证码问题还是网络问题
                 if not captcha_success:
-                    logger.error("❌ 验证码识别超时")
+                    logger.error("Captcha solve timed out")
+                    await self._save_login_debug("captcha_timeout")
                     return (False, ErrorType.CAPTCHA_FAILED)
-                logger.error("❌ 登录超时")
+                if await self._confirm_login_state_from_page("captcha_success_timeout"):
+                    return (True, ErrorType.SUCCESS)
+                logger.error("Epic login timed out")
+                await self._save_login_debug("login_timeout")
                 return (False, ErrorType.LOGIN_TIMEOUT)
 
         except asyncio.TimeoutError:

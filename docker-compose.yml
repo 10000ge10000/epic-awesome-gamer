@@ -73,35 +73,33 @@ services:
         max-file: "1"
 
   # ============================================================
-  # WARP 代理：提供 Cloudflare 网络出口
-  # 用于访问 Epic Games Store（自动重启换 IP）
-  # 镜像: caomingjun/warp（集成 WARP + gost HTTP 代理）
+  # WARP 代理：单容器多出口（10 个独立 WARP 实例）
+  # 端口: epic-warp:19000-19009
+  # 控制接口: http://epic-warp:18080/restart/{idx}
   # ============================================================
   warp:
-    image: caomingjun/warp:latest
+    image: zen-warp-multi:local
     container_name: epic-warp
     restart: always
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      net.ipv6.conf.all.disable_ipv6: 0
+    privileged: true
     environment:
-      # gost 监听端口（HTTP 代理）
-      - GOST_ARGS=-L http://:19000
+      - WARP_INSTANCE_COUNT=10
+      - WARP_START_PORT=19000
+      - WARP_CONTROL_PORT=18080
     volumes:
-      - ./data/warp:/var/lib/cloudflare-warp
+      - ./data/warp:/warp-data
     healthcheck:
-      # 使用 curl 测试代理连通性
-      test: ["CMD-SHELL", "curl -s --connect-timeout 5 -x http://127.0.0.1:19000 https://api.ipify.org || exit 1"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 8m
     logging:
       driver: json-file
       options:
         max-size: "1m"
         max-file: "1"
+
 
   # ============================================================
   # Worker: 后台任务执行器（浏览器自动化）
@@ -128,22 +126,25 @@ services:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
       - ENABLE_APSCHEDULER=false
-      - API_PROVIDER=siliconflow
-      - API_BASE_URL=https://api.siliconflow.cn/v1
+      - API_PROVIDER=${API_PROVIDER:-siliconflow}
+      - API_BASE_URL=${API_BASE_URL:-https://api.siliconflow.cn/v1}
+      - OPENCODE_BASE_URL=https://opencode.ai/zen
       - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 中配置 INTERNAL_API_TOKEN}
       - TASK_TIMEOUT_SECONDS=600
       - TASK_LOCK_SECONDS=86400
-      - HCAPTCHA_EXECUTION_TIMEOUT=180
-      - HCAPTCHA_RESPONSE_TIMEOUT=45
-      - HCAPTCHA_PAYLOAD_TIMEOUT=45
+      - HCAPTCHA_EXECUTION_TIMEOUT=${HCAPTCHA_EXECUTION_TIMEOUT:-240}
+      - HCAPTCHA_RESPONSE_TIMEOUT=${HCAPTCHA_RESPONSE_TIMEOUT:-120}
+      - HCAPTCHA_PAYLOAD_TIMEOUT=${HCAPTCHA_PAYLOAD_TIMEOUT:-90}
       - HCAPTCHA_FRAME_TIMEOUT=20
-      - HCAPTCHA_SOLVE_MAX_ATTEMPTS=2
+      - HCAPTCHA_SOLVE_MAX_ATTEMPTS=4
       # WARP HTTP 代理（容器内部网络）
       - HTTP_PROXY=http://epic-warp:19000
       - HTTPS_PROXY=http://epic-warp:19000
-      # WARP 代理配置（用于检测和重启）
+      # WARP 代理配置（用于检测、选择端口和重启单个出口）
       - WARP_PROXY_HOST=epic-warp
-      - WARP_PROXY_PORT=19000
+      - WARP_PROXY_START_PORT=19000
+      - WARP_PROXY_COUNT=10
+      - WARP_CONTROL_URL_TEMPLATE=http://epic-warp:18080/restart/{idx}
       # 内部服务不走代理（修复入库 API 失败问题）
       - NO_PROXY=web,epic-web,redis,epic-redis,localhost,127.0.0.1
       # ============================================================
@@ -163,12 +164,23 @@ services:
       - GEMINI_API_KEY=not_used
       # ============================================================
       # 模型配置（SiliconFlow 实测通过）
-      - CAPTCHA_MODEL=Qwen/Qwen3-VL-30B-A3B-Thinking
-      - CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3.5-397B-A17B
+      - CAPTCHA_MODEL=${CAPTCHA_MODEL:-Qwen/Qwen3-VL-32B-Instruct}
+      - CAPTCHA_MODEL_FALLBACK=${CAPTCHA_MODEL_FALLBACK:-Qwen/Qwen3-VL-30B-A3B-Instruct}
+      - CAPTCHA_RESPONSE_MAX_TOKENS=1200
+      - CAPTCHA_API_TIMEOUT=${CAPTCHA_API_TIMEOUT:-60}
+      - CAPTCHA_API_RETRIES=1
+      - CAPTCHA_FALLBACK_AFTER_CALLS=0
+      - CAPTCHA_FALLBACK_TIME_WINDOW=300
+      # 可选：外部验证码服务商 fallback（默认关闭；Key 只放 .env）
+      - CAPTCHA_PROVIDER=${CAPTCHA_PROVIDER:-none}
+      - CAPTCHA_PROVIDER_API_KEY=${CAPTCHA_PROVIDER_API_KEY:-}
+      - CAPTCHA_PROVIDER_SITE_KEY=${CAPTCHA_PROVIDER_SITE_KEY:-91e4137f-95af-4bc9-97af-cdcedce21c8c}
+      - CAPTCHA_PROVIDER_TIMEOUT=${CAPTCHA_PROVIDER_TIMEOUT:-180}
+      - CAPTCHA_PROVIDER_POLL_INTERVAL=${CAPTCHA_PROVIDER_POLL_INTERVAL:-5}
       - PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
       - PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
-      - RESPONSE_TIMEOUT=120
       # 验证码失败后的自动恢复策略
+      - COOKIE_INVALID_MAX_RETRIES=${COOKIE_INVALID_MAX_RETRIES:-1}
       - CAPTCHA_FAILURE_MAX_RETRIES=2
       - CAPTCHA_FAILURE_RETRY_DELAY_SECONDS=900
       - NETWORK_FAILURE_MAX_RETRIES=2

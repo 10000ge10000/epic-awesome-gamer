@@ -1327,21 +1327,25 @@ class EpicGames:
                 continue
 
             # 6. 尝试领取
-            # 初始化脚本已经在页面内部点击 Get；这里只等待结账界面。
-            surface = await self._wait_for_checkout_surface(page, timeout_ms=60000)
-            logger.info(f"✅ 商品页进入结账状态: {surface}")
-
-            # 点击后，转入即时结账流程
+            # 单个游戏的结账/验证码失败不应中断整轮任务；记录失败后继续处理后续游戏。
             try:
+                # 初始化脚本已经在页面内部点击 Get；这里只等待结账界面。
+                surface = await self._wait_for_checkout_surface(page, timeout_ms=60000)
+                logger.info(f"✅ 商品页进入结账状态: {surface}")
+
+                # 点击后，转入即时结账流程
                 checkout_success = await self._handle_instant_checkout(
                     page,
                     url,
                     promotion.namespace,
                 )
-            except Exception:
+            except Exception as err:
+                if _is_driver_disconnect_error(err):
+                    raise RuntimeError(f"driver checkout failed: {err}") from err
+                logger.warning(f"⚠️ 游戏领取失败，继续处理其他周免游戏: {promotion.title} - {err}")
                 outcomes[promotion.title] = "failed"
                 self._emit_game_result(promotion.title, "failed")
-                raise
+                continue
 
             if checkout_success:
                 outcomes[promotion.title] = "claimed"
