@@ -72,7 +72,11 @@ nano .env
 ```env
 API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 API_BASE_URL=https://api.siliconflow.cn/v1
+INTERNAL_API_TOKEN=使用-openssl-rand-hex-32-生成
 ```
+
+执行 `openssl rand -hex 32` 生成 `INTERNAL_API_TOKEN`。该值只用于 web 与 worker
+之间的内部接口认证，不能与 `API_KEY` 共用。
 
 SiliconFlow key 获取地址：
 
@@ -95,8 +99,9 @@ docker compose up -d --build
 1. 默认 Web 端口是 `18000`，访问地址为 `http://服务器IP:18000`。
 2. 默认 AI 提供商是 SiliconFlow，接口地址为 `https://api.siliconflow.cn/v1`。
 3. `API_KEY` 必须放在 `.env`，`.env` 已被 `.gitignore` 忽略。
-4. 旧版 `API_KEY` / `API_BASE_URL` 仍可兼容读取，但新部署不要再使用旧变量名。
-5. WARP 容器负责访问 Epic Games；如果 Epic 风控严重，可能需要更稳定的住宅代理或更换出口。
+4. `INTERNAL_API_TOKEN` 必须是独立随机值，一键安装脚本会自动生成。
+5. 旧版 `SILICONFLOW_API_KEY` / `SILICONFLOW_BASE_URL` 仍可兼容读取，新部署统一使用 `API_KEY` / `API_BASE_URL`。
+6. WARP 容器负责访问 Epic Games；如果 Epic 风控严重，可能需要更稳定的住宅代理或更换出口。
 
 ---
 
@@ -129,7 +134,7 @@ docker compose up -d --build
 | 类型 | 主模型 | 备用模型 | 用途 |
 |------|--------|----------|------|
 | 主力文本 | `deepseek-ai/DeepSeek-V4-Flash` | `deepseek-ai/DeepSeek-V4-Pro` | 页面判断、流程决策、结构化文本输出 |
-| 验证码视觉 | `Qwen/Qwen3-VL-32B-Instruct` | `Qwen/Qwen3-VL-30B-A3B-Instruct` | hCaptcha 图像识别 |
+| 验证码视觉 | `Qwen/Qwen3-VL-30B-A3B-Thinking` | `Qwen/Qwen3.5-397B-A17B` | hCaptcha 空间推理；主模型连续失败后切换到实测更快的备用模型 |
 
 相关环境变量：
 
@@ -138,8 +143,10 @@ API_PROVIDER=siliconflow
 API_BASE_URL=https://api.siliconflow.cn/v1
 PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
 PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
-CAPTCHA_MODEL=Qwen/Qwen3-VL-32B-Instruct
-CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
+CAPTCHA_MODEL=Qwen/Qwen3-VL-30B-A3B-Thinking
+CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3.5-397B-A17B
+ENABLE_APSCHEDULER=true
+DAILY_SCHEDULE_LOCK_SECONDS=86400
 ```
 
 智能切换机制：
@@ -148,6 +155,9 @@ CAPTCHA_MODEL_FALLBACK=Qwen/Qwen3-VL-30B-A3B-Instruct
 - API 调用异常时自动使用对应备用模型重试一次。
 - 视觉请求和文本请求会按是否包含图片自动选择不同模型。
 - 验证码失败会触发 WARP 换 IP，并将账号放入延迟队列，默认 15 分钟后重试，最多 2 次。
+- 网络超时默认延迟 10 分钟重试，最多 2 次。
+- 结账只有在成功页、支付框关闭或商品页显示已入库时才会记录为成功。
+- 每日自动调度必须显式设置 `ENABLE_APSCHEDULER=true`，并通过 Redis 日锁保证同一天只有一个 Web 实例安排任务；临时预览 Web 容器不要开启，避免重复入队。
 - Docker 容器日志和应用文件日志均按 1 MB 自动轮转，避免长期运行撑满磁盘。
 
 ### 费用与额度
@@ -191,11 +201,21 @@ epic-kiosk/
 
 - 同一邮箱任务互斥。
 - 已存储账号需验证密码。
+- Worker 内部删除和领取记录接口使用共享 token 鉴权。
+- 浏览器只有持有本次任务的一次性确认 token 才能保存账号。
 - 自动清理浏览器缓存。
+
+### 密码存储说明
+
+- 当前版本为了定时自动登录，会将 Epic 密码明文保存在本机 `data/kiosk.db`。
+- 不要将 `data/` 目录同步到公开仓库、公共网盘或不可信备份。
+- 建议限制宿主机和管理面板访问权限，并定期检查备份权限。
+- 删除托管账号会同时删除数据库记录和对应浏览器 profile。
 
 ### Key 安全
 
 - 不要把 `API_KEY` 写进 Git 跟踪文件。
+- 不要公开 `INTERNAL_API_TOKEN`，也不要让它与模型 API Key 相同。
 - 不要把 `sk-` key 发到公开聊天、Issue、日志或截图里。
 - 如果 key 泄露，应立即在 SiliconFlow 后台删除并重新生成。
 

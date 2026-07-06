@@ -403,52 +403,621 @@
             animation: spin 0.8s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ===== 2026 控制台视觉重构 ===== */
+        :root {
+            --page: #f6f8fb;
+            --surface: #ffffff;
+            --surface-muted: #f9fafb;
+            --text: #172033;
+            --text-secondary: #667085;
+            --border: #e4e7ec;
+            --border-strong: #d0d5dd;
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --success: #168a5b;
+            --warning: #b7791f;
+            --danger: #c2413b;
+        }
+
+        body {
+            background: var(--page);
+            color: var(--text);
+            overflow-x: hidden;
+        }
+
+        #particles-canvas { display: none; }
+        #page-loader { background: var(--page); }
+        #page-loader .spinner {
+            border-color: #dbeafe;
+            border-top-color: var(--primary);
+        }
+
+        .content-wrapper {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 24px 32px 32px;
+        }
+
+        .announcement-bar {
+            background: #eff6ff;
+            border-bottom: 1px solid #bfdbfe;
+            color: #334155;
+        }
+
+        .announcement-bar .text-blue-200 { color: #334155 !important; }
+        .announcement-bar .text-blue-400 { color: var(--primary) !important; }
+
+        .glass-panel {
+            background: var(--surface);
+            backdrop-filter: none;
+            border: 1px solid var(--border);
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        }
+
+        .main-content {
+            max-width: none;
+            padding: 0;
+            display: block;
+        }
+
+        .tab-content-centered {
+            display: block;
+            width: 100%;
+        }
+
+        .app-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 24px;
+        }
+
+        .brand-mark {
+            width: 42px;
+            height: 42px;
+            border-radius: 8px;
+            background: var(--primary);
+            box-shadow: none;
+        }
+
+        .brand-title { color: var(--text); }
+        .brand-subtitle {
+            color: var(--text-secondary);
+            font-family: Inter, sans-serif;
+            text-transform: none;
+            letter-spacing: 0;
+        }
+
+        .app-nav {
+            padding: 4px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            box-shadow: none;
+        }
+
+        .tab-btn {
+            min-height: 40px;
+            padding: 9px 16px;
+            border-radius: 6px;
+            letter-spacing: 0;
+        }
+
+        .tab-btn-active {
+            background: var(--primary);
+            box-shadow: none;
+        }
+
+        .tab-btn-inactive { color: var(--text-secondary); }
+        .tab-btn-inactive:hover {
+            color: var(--text);
+            background: #f2f4f7;
+        }
+
+        .dashboard-intro {
+            margin-bottom: 20px;
+        }
+
+        .dashboard-intro h2 {
+            color: var(--text);
+            font-size: 26px;
+            line-height: 1.25;
+            font-weight: 700;
+        }
+
+        .dashboard-intro p {
+            margin-top: 7px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .work-area-container,
+        .work-area-container.is-working {
+            display: grid;
+            grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr);
+            align-items: start;
+            justify-content: stretch;
+            gap: 20px;
+        }
+
+        .work-panel-wrapper,
+        .work-area-container.is-working .work-panel-wrapper {
+            width: auto;
+            min-width: 0;
+        }
+
+        .work-panel {
+            width: 100%;
+            max-width: none;
+            min-height: 100%;
+            padding: 24px;
+            border-radius: 8px;
+        }
+
+        .work-panel-title {
+            margin-bottom: 4px;
+            color: var(--text);
+            font-size: 20px;
+            text-align: left;
+        }
+
+        .work-panel-description {
+            margin-bottom: 20px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .account-notice {
+            margin-bottom: 20px;
+            padding: 12px 14px;
+            border: 1px solid #bfdbfe;
+            border-radius: 6px;
+            background: #eff6ff;
+            color: #334155;
+        }
+
+        .account-notice a { color: var(--primary) !important; }
+        .form-label {
+            display: block;
+            margin-bottom: 7px;
+            color: #344054;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .work-input {
+            padding: 13px 14px;
+            border-radius: 6px;
+            border-color: var(--border-strong) !important;
+            background: var(--surface) !important;
+            color: var(--text) !important;
+        }
+
+        .work-input::placeholder { color: #98a2b3; }
+        .work-input:focus {
+            border-color: var(--primary) !important;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+        }
+
+        .custom-checkbox {
+            border-color: #98a2b3;
+            background-color: var(--surface);
+        }
+
+        .work-btn {
+            min-height: 50px;
+            padding: 13px 18px;
+            border-radius: 6px;
+        }
+
+        #btn-deposit {
+            background: var(--primary);
+            box-shadow: none;
+        }
+
+        #btn-deposit:hover { background: var(--primary-hover); }
+
+        #btn-delete {
+            width: auto;
+            padding: 6px 0;
+            border: 0;
+            border-radius: 0;
+            color: var(--danger);
+            font-size: 13px;
+            text-align: left;
+        }
+
+        #btn-delete:hover {
+            background: transparent;
+            color: #991b1b;
+            text-decoration: underline;
+        }
+
+        .status-panel-wrapper,
+        .status-panel-wrapper.is-visible {
+            width: auto;
+            min-width: 0;
+            opacity: 1;
+            transform: none;
+            overflow: visible;
+        }
+
+        .status-panel {
+            width: 100%;
+            max-width: none;
+            max-height: none;
+            padding: 24px;
+            border-radius: 8px;
+        }
+
+        .task-summary {
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .task-summary h3 {
+            color: var(--text);
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .task-summary p {
+            margin-top: 4px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .task-steps {
+            display: grid;
+            gap: 10px;
+            margin: 16px 0;
+        }
+
+        .task-step {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #344054;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .task-step-index {
+            display: inline-flex;
+            width: 24px;
+            height: 24px;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            background: #f2f4f7;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .terminal {
+            min-height: 180px;
+            max-height: 280px;
+            border: 0;
+            border-radius: 6px;
+            background: #111827;
+        }
+
+        .terminal-text {
+            color: #d1d5db;
+            text-shadow: none;
+        }
+
+        .status-panel .text-slate-400 { color: var(--text-secondary) !important; }
+        .status-panel .text-slate-600 { color: #98a2b3 !important; }
+
+        .stats-section {
+            margin: 0 0 28px;
+        }
+
+        .section-heading {
+            margin-bottom: 12px;
+            color: var(--text);
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .stat-item {
+            min-width: 0;
+            padding: 16px 18px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: none;
+        }
+
+        .stat-item:hover {
+            border-color: var(--border-strong);
+            transform: none;
+        }
+
+        .stat-icon {
+            width: 38px !important;
+            height: 38px !important;
+            border-radius: 6px;
+        }
+
+        .stat-label { color: var(--text-secondary); }
+        .stat-value { color: var(--text) !important; }
+
+        .tab-content-scroll { overflow: visible; }
+        .query-shell,
+        .free-games-shell {
+            padding: 24px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--surface);
+        }
+
+        .query-toolbar {
+            max-width: none;
+            margin: 0 0 24px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .query-toolbar input {
+            min-width: 0;
+            border: 1px solid var(--border-strong) !important;
+            border-radius: 6px 0 0 6px;
+            color: var(--text) !important;
+        }
+
+        #btn-query {
+            flex: 0 0 auto;
+            min-width: 84px;
+            border-radius: 0 6px 6px 0;
+            background: #344054;
+            white-space: nowrap;
+        }
+
+        .games-grid {
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 16px;
+            max-width: none;
+        }
+
+        .game-card {
+            border-color: var(--border) !important;
+            border-radius: 8px;
+            background: #1f2937 !important;
+        }
+
+        .game-card:hover {
+            transform: translateY(-2px);
+            border-color: #93c5fd !important;
+            box-shadow: 0 8px 20px rgba(16, 24, 40, 0.12);
+        }
+
+        .free-games-grid {
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            max-width: none;
+        }
+
+        .free-game-card {
+            border-radius: 8px !important;
+            background: var(--surface);
+        }
+
+        .free-game-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(16, 24, 40, 0.12);
+        }
+
+        .free-game-card h4 { color: var(--text) !important; }
+        .free-game-card::before { display: none; }
+
+        .modal-card {
+            border-radius: 8px !important;
+            border-color: var(--border) !important;
+            background: var(--surface) !important;
+            color: var(--text);
+        }
+
+        .modal-card h3 { color: var(--text) !important; }
+        .modal-card .text-slate-400,
+        .modal-card .text-slate-300 { color: var(--text-secondary) !important; }
+        .modal-card .bg-slate-800 { background: var(--surface-muted) !important; }
+
+        #toast-container { top: 16px; right: 16px; }
+        .toast {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: 0 8px 24px rgba(16, 24, 40, 0.14);
+        }
+
+        .toast-success { border-left: 4px solid var(--success); }
+        .toast-error { border-left: 4px solid var(--danger); }
+        .toast-warning { border-left: 4px solid var(--warning); }
+        .toast-info { border-left: 4px solid var(--primary); }
+
+        footer {
+            margin-top: 32px !important;
+            border-color: var(--border) !important;
+        }
+
+        footer a { color: var(--text-secondary) !important; }
+
+        @media (max-width: 767px) {
+            .content-wrapper {
+                padding: 16px;
+            }
+
+            .app-header { order: 1; }
+            .main-content { order: 2; }
+            .stats-section {
+                order: 3;
+                margin: 24px 0 0;
+            }
+            .stats-section-title { display: block !important; }
+            footer { order: 4; }
+
+            .announcement-bar {
+                padding: 9px 40px 9px 12px !important;
+                text-align: left;
+            }
+
+            .announcement-bar span:first-child { display: none; }
+            .app-header {
+                align-items: stretch;
+                margin-bottom: 20px;
+            }
+
+            .app-header { flex-direction: column; }
+
+            .brand-row {
+                flex-direction: row !important;
+                align-items: center !important;
+                gap: 10px !important;
+            }
+
+            .brand-mark {
+                width: 38px;
+                height: 38px;
+            }
+            .app-nav {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                width: 100%;
+            }
+
+            .tab-btn {
+                width: 100%;
+                min-width: 0;
+                padding: 9px 7px;
+            }
+
+            .dashboard-intro { margin-bottom: 14px; }
+            .dashboard-intro h2 { font-size: 22px; }
+            .dashboard-intro p { margin-top: 4px; }
+
+            .work-area-container,
+            .work-area-container.is-working {
+                display: flex;
+                flex-direction: column !important;
+                gap: 16px !important;
+            }
+
+            .work-panel,
+            .status-panel {
+                padding: 16px !important;
+                border-radius: 8px;
+            }
+
+            .work-panel-description,
+            .account-notice { margin-bottom: 14px; }
+            .account-notice { padding: 10px 12px; }
+            #deposit-form > :not([hidden]) ~ :not([hidden]) { margin-top: 14px; }
+
+            .status-panel-wrapper,
+            .status-panel-wrapper.is-visible {
+                width: 100% !important;
+                max-height: none !important;
+                opacity: 1 !important;
+                transform: none !important;
+                overflow: visible !important;
+            }
+
+            .status-panel { max-height: none !important; }
+            .terminal { min-height: 150px; max-height: 220px; }
+
+            .stats-bar {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 10px;
+            }
+
+            .stat-item {
+                padding: 13px;
+                gap: 10px;
+            }
+
+            .stat-icon {
+                width: 34px !important;
+                height: 34px !important;
+            }
+
+            .stat-value { font-size: 19px; }
+            .query-shell,
+            .free-games-shell { padding: 16px; }
+
+            .query-toolbar {
+                display: grid !important;
+                grid-template-columns: minmax(0, 1fr) 76px;
+                gap: 0 !important;
+            }
+
+            .query-toolbar input { width: 100%; }
+            #btn-query {
+                width: 76px;
+                min-width: 76px;
+                padding: 0 12px;
+            }
+
+            .free-games-grid { grid-template-columns: 1fr; }
+            .games-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            footer { display: none; }
+        }
     </style>
 </head>
 <body>
     <!-- 页面加载遮罩 -->
     <div id="page-loader"><div class="spinner"></div></div>
 
-    <canvas id="particles-canvas"></canvas>
     <div id="toast-container"></div>
 
     <!-- 顶部公告栏 - 可手动关闭 -->
     <div id="announcement-bar" class="announcement-bar py-3 px-4 text-center text-sm relative">
         <div class="flex items-center justify-center gap-2 flex-wrap pr-8">
             <span>📢</span>
-            <span class="text-blue-200">欢迎大家使用 Epic 自动驾驶！有问题欢迎关注我的 B 站频道：
+            <span class="text-blue-200">使用前请阅读账号与两步验证说明。教程与更新：
                 <a href="https://space.bilibili.com/59438380" target="_blank" class="text-blue-400 hover:text-blue-300 font-semibold hover:underline">一万AI分享</a>
-                ，获取更多教程和更新动态
             </span>
         </div>
         <button onclick="closeAnnouncement()" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors text-lg" title="关闭公告">✕</button>
     </div>
 
-    <div class="content-wrapper p-4 md:p-6">
+    <div class="content-wrapper">
 
         <!-- 头部 -->
-        <div class="w-full flex flex-col md:flex-row justify-between items-center mb-5 fade-in gap-4" style="animation-delay: 0.1s;">
-            <div class="flex items-center gap-4">
-                <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/30" style="width:48px;height:48px;flex-shrink:0">
+        <div class="app-header fade-in" style="animation-delay: 0.1s;">
+            <div class="brand-row flex items-center gap-3">
+                <div class="brand-mark flex items-center justify-center">
                     <svg class="w-7 h-7 text-white" style="width:28px;height:28px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                 </div>
                 <div>
-                    <h1 class="text-2xl font-black tracking-tight text-white">Epic <span class="text-blue-400">自动驾驶</span></h1>
-                    <p class="text-xs text-gray-400 font-mono tracking-widest uppercase">Automated Asset Management</p>
+                    <h1 class="brand-title text-2xl font-bold">Epic 自动驾驶</h1>
+                    <p class="brand-subtitle text-sm">自动领取免费游戏与资产管理</p>
                 </div>
             </div>
 
-            <!-- 更大更醒目的 Tab 按钮 -->
-            <div class="bg-slate-800/60 p-1 rounded-full border border-white/10 flex backdrop-blur-md gap-1">
-                <button onclick="switchTab('deposit')" id="tab-deposit" class="tab-btn tab-btn-active">自动驾驶</button>
-                <button onclick="switchTab('query')" id="tab-query" class="tab-btn tab-btn-inactive">资产清单</button>
-                <button onclick="switchTab('free-games')" id="tab-free-games" class="tab-btn tab-btn-inactive">免费游戏</button>
+            <div class="app-nav flex gap-1" role="tablist" aria-label="主要功能">
+                <button onclick="switchTab('deposit')" id="tab-deposit" class="tab-btn tab-btn-active" role="tab">控制台</button>
+                <button onclick="switchTab('query')" id="tab-query" class="tab-btn tab-btn-inactive" role="tab">资产</button>
+                <button onclick="switchTab('free-games')" id="tab-free-games" class="tab-btn tab-btn-inactive" role="tab">本周免费</button>
             </div>
         </div>
 
         <!-- 统计状态栏 - 紧凑横向布局 -->
-        <div class="w-full mb-5 fade-in" style="animation-delay: 0.12s;">
-            <div class="stats-bar flex-wrap justify-center md:justify-start">
+        <section id="stats-section" class="stats-section fade-in" style="animation-delay: 0.12s;">
+            <h2 class="stats-section-title section-heading hidden">运行概览</h2>
+            <div class="stats-bar">
                 <div class="stat-item">
                     <div class="stat-icon bg-blue-500/20" style="width:44px;height:44px;flex-shrink:0">
                         <svg class="w-6 h-6 text-blue-400" style="width:24px;height:24px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
@@ -472,7 +1041,7 @@
                         <svg class="w-6 h-6 text-purple-400" style="width:24px;height:24px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
                     </div>
                     <div>
-                        <p class="stat-label">累计领取</p>
+                        <p class="stat-label">累计资产</p>
                         <p class="stat-value text-purple-400" id="stat-total">--</p>
                     </div>
                 </div>
@@ -486,38 +1055,49 @@
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
 
         <!-- 主内容区域 -->
         <div class="main-content">
 
             <!-- 自动驾驶 Tab -->
             <div id="view-deposit" class="tab-content-centered fade-in" style="animation-delay: 0.15s;">
+                <div class="dashboard-intro">
+                    <h2>让系统接管每周免费游戏领取</h2>
+                    <p>填写 Epic 账号后，系统将验证登录、处理验证码，并在后续定时任务中自动领取。</p>
+                </div>
                 <div id="work-area-container" class="work-area-container">
                     <!-- 左侧：工作面板 -->
                     <div class="work-panel-wrapper">
                         <div class="work-panel glass-panel">
-                            <h2 class="text-2xl font-bold text-white mb-6 text-center">Epic 自动驾驶</h2>
+                            <h2 class="work-panel-title">托管 Epic 账号</h2>
+                            <p class="work-panel-description">第一步：填写账号。验证成功后会自动加入定时领取。</p>
 
-                            <div class="bg-amber-500/10 border border-amber-500/25 rounded-xl p-4 mb-6 text-sm text-amber-100/90">
+                            <div class="account-notice text-sm">
                                 <div class="flex items-start gap-3">
-                                    <span class="text-xl">⚠️</span>
+                                    <svg class="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                                     <ul class="space-y-2 list-disc list-inside">
-                                        <li>建议使用新账号：
+                                        <li>首次使用建议准备一个新账号：
                                             <a href="https://www.epicgames.com/id/register" target="_blank" class="text-amber-400 hover:text-amber-300 font-semibold hover:underline">注册 →</a>
                                         </li>
-                                        <li>必须关闭两步验证 (2FA)：
-                                            <a href="https://www.epicgames.com/account/password" target="_blank" class="text-amber-400 hover:text-amber-300 font-semibold hover:underline">关闭 →</a>
+                                        <li>自动登录前需要关闭两步验证：
+                                            <a href="https://www.epicgames.com/account/password" target="_blank" class="text-amber-400 hover:text-amber-300 font-semibold hover:underline">设置 →</a>
                                         </li>
                                     </ul>
                                 </div>
                             </div>
 
                             <div id="deposit-form" class="space-y-5">
-                                <input type="email" id="d_email" placeholder="Epic Email" class="w-full bg-slate-900/60 border border-slate-600 text-white work-input focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all">
+                                <div>
+                                    <label for="d_email" class="form-label">Epic 邮箱</label>
+                                    <input type="email" id="d_email" placeholder="name@example.com" autocomplete="username" class="w-full border work-input focus:outline-none transition-all">
+                                </div>
                                 <div class="relative">
-                                    <input type="password" id="d_password" placeholder="Password" class="w-full bg-slate-900/60 border border-slate-600 text-white work-input focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all pr-12">
-                                    <button onclick="togglePwd('d_password', this)" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-lg">👁️</button>
+                                    <label for="d_password" class="form-label">Epic 密码</label>
+                                    <input type="password" id="d_password" placeholder="仅用于自动登录" autocomplete="current-password" class="w-full border work-input focus:outline-none transition-all pr-12">
+                                    <button onclick="togglePwd('d_password', this)" class="absolute right-4 bottom-3 text-slate-400 hover:text-slate-600" title="显示密码" aria-label="显示密码">
+                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0zm6 0c-1.5 4-4.5 6-9 6s-7.5-2-9-6c1.5-4 4.5-6 9-6s7.5 2 9 6z"></path></svg>
+                                    </button>
                                 </div>
 
                                 <div class="flex items-center gap-3 text-sm text-slate-400">
@@ -525,13 +1105,13 @@
                                     <label for="remember_email" class="cursor-pointer">记住邮箱</label>
                                 </div>
 
-                                <button onclick="startVerify()" id="btn-deposit" class="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-bold work-btn shadow-lg shadow-blue-500/30 transition-all flex items-center justify-center gap-2">
-                                    <span class="text-xl">🚀</span>
+                                <button onclick="startVerify()" id="btn-deposit" class="w-full text-white font-semibold work-btn transition-all flex items-center justify-center gap-2">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5v14l11-7z"></path></svg>
                                     <span>启动引擎</span>
                                 </button>
 
-                                <button onclick="deleteAccount()" id="btn-delete" class="w-full bg-transparent border border-red-800/50 text-red-400 hover:bg-red-900/20 hover:border-red-500 hover:text-red-300 font-semibold py-3 rounded-xl transition-all">
-                                    停止托管 / 删除账号
+                                <button onclick="deleteAccount()" id="btn-delete" class="font-semibold transition-all">
+                                    停止托管并删除账号数据
                                 </button>
                             </div>
                         </div>
@@ -540,15 +1120,24 @@
                     <!-- 右侧：系统日志面板（工作中显示） -->
                     <div id="status-panel-wrapper" class="status-panel-wrapper">
                         <div class="status-panel glass-panel flex flex-col">
-                            <div class="flex justify-between items-center mb-3 px-1">
-                                <span class="text-sm font-mono text-slate-400 flex items-center gap-2">
-                                    <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                                    SYSTEM LOGS
-                                </span>
-                                <button onclick="document.getElementById('status-log').innerText='_ Ready.'" class="text-xs text-slate-600 hover:text-slate-400">CLEAR</button>
+                            <div class="task-summary">
+                                <h3>当前任务</h3>
+                                <p id="task-summary-text">暂无运行中的任务。启动后会在这里显示关键进度。</p>
                             </div>
-                            <div class="terminal rounded-xl p-4 flex-1 overflow-y-auto flex flex-col-reverse border border-slate-700/50 min-h-[300px]">
-                                <div id="status-log" class="terminal-text text-sm leading-relaxed whitespace-pre-wrap">_ Ready.</div>
+                            <div class="task-steps" aria-label="任务步骤">
+                                <div class="task-step"><span class="task-step-index">1</span><span>提交账号</span></div>
+                                <div class="task-step"><span class="task-step-index">2</span><span>验证登录与验证码</span></div>
+                                <div class="task-step"><span class="task-step-index">3</span><span>领取并保存结果</span></div>
+                            </div>
+                            <div class="flex justify-between items-center mb-3 px-1">
+                                <span class="text-sm text-slate-400 flex items-center gap-2">
+                                    <span class="w-2 h-2 bg-green-500 rounded-full"></span>
+                                    任务日志
+                                </span>
+                                <button onclick="document.getElementById('status-log').innerText='准备就绪。'" class="text-xs text-slate-600 hover:text-slate-400">清空</button>
+                            </div>
+                            <div class="terminal p-4 flex-1 overflow-y-auto flex flex-col-reverse">
+                                <div id="status-log" class="terminal-text text-sm leading-relaxed whitespace-pre-wrap">准备就绪。</div>
                             </div>
                         </div>
                     </div>
@@ -557,61 +1146,72 @@
 
             <!-- 资产清单 Tab -->
             <div id="view-query" class="tab-content tab-content-scroll hidden">
-                <div class="flex gap-3 mb-6 glass-panel p-3 rounded-xl max-w-xl mx-auto">
-                    <input type="email" id="q_email" placeholder="输入邮箱查询资产..." class="flex-1 bg-transparent border-none text-white px-4 py-2.5 focus:ring-0 text-base">
-                    <button onclick="doQuery()" id="btn-query" class="bg-slate-700 hover:bg-slate-600 text-white px-6 rounded-lg font-bold transition-all">检索</button>
-                </div>
-
-                <div id="skeleton-grid" class="hidden games-grid max-w-4xl mx-auto">
-                    <div class="skeleton h-64 rounded-xl"></div>
-                    <div class="skeleton h-64 rounded-xl"></div>
-                    <div class="skeleton h-64 rounded-xl"></div>
-                    <div class="skeleton h-64 rounded-xl"></div>
-                    <div class="skeleton h-64 rounded-xl"></div>
-                </div>
-
-                <div id="query-result-area" class="hidden">
-                    <div class="flex justify-between items-center mb-4 px-1">
-                        <h3 class="text-lg font-bold text-white">资产列表</h3>
-                        <span id="log-count" class="bg-blue-900 text-blue-300 text-sm px-3 py-1 rounded-full">0</span>
+                <div class="query-shell">
+                    <div class="dashboard-intro">
+                        <h2>查询账号资产</h2>
+                        <p>输入托管邮箱，查看系统已经为该账号记录的免费游戏。</p>
                     </div>
-                    <div id="games-grid" class="games-grid max-w-4xl mx-auto"></div>
-                    <div id="empty-msg" class="hidden text-center py-16 text-slate-500 text-lg">NO_ASSETS_FOUND</div>
+                    <div class="query-toolbar flex">
+                        <input type="email" id="q_email" placeholder="输入 Epic 邮箱" class="flex-1 bg-transparent px-4 py-3 focus:outline-none text-base">
+                        <button onclick="doQuery()" id="btn-query" class="text-white px-6 font-semibold transition-all">查询</button>
+                    </div>
+
+                    <div id="skeleton-grid" class="hidden games-grid">
+                        <div class="skeleton h-64"></div>
+                        <div class="skeleton h-64"></div>
+                        <div class="skeleton h-64"></div>
+                        <div class="skeleton h-64"></div>
+                        <div class="skeleton h-64"></div>
+                    </div>
+
+                    <div id="query-result-area" class="hidden">
+                        <div class="flex justify-between items-center mb-4 px-1">
+                            <h3 class="section-heading mb-0">资产列表</h3>
+                            <span id="log-count" class="bg-blue-50 text-blue-700 text-sm px-3 py-1 rounded-full">0</span>
+                        </div>
+                        <div id="games-grid" class="games-grid"></div>
+                        <div id="empty-msg" class="hidden text-center py-16 text-slate-500">
+                            <p class="font-semibold text-slate-700">暂未记录资产</p>
+                            <p class="mt-2 text-sm">先在控制台完成账号托管，领取记录会显示在这里。</p>
+                        </div>
+                    </div>
                 </div>
             </div>
 
             <!-- 免费游戏 Tab -->
             <div id="view-free-games" class="tab-content tab-content-scroll hidden">
-                <div class="text-center mb-6">
-                    <h3 class="text-xl font-bold text-white mb-1">本周免费游戏</h3>
-                    <p class="text-sm text-slate-400">来自 Epic Games Store 官方免费促销</p>
-                </div>
+                <div class="free-games-shell">
+                    <div class="dashboard-intro">
+                        <h2>本周免费游戏</h2>
+                        <p>数据来自 Epic Games Store 官方促销接口，点击卡片可前往商店查看。</p>
+                    </div>
 
-                <div id="free-games-skeleton" class="free-games-grid">
-                    <div class="skeleton h-80 rounded-xl"></div>
-                    <div class="skeleton h-80 rounded-xl"></div>
-                </div>
+                    <div id="free-games-skeleton" class="free-games-grid">
+                        <div class="skeleton h-80"></div>
+                        <div class="skeleton h-80"></div>
+                    </div>
 
-                <div id="free-games-grid" class="hidden free-games-grid"></div>
+                    <div id="free-games-grid" class="hidden free-games-grid"></div>
 
-                <div id="free-games-empty" class="hidden text-center py-16 text-slate-500">
-                    <p class="text-lg mb-2">暂无免费游戏</p>
-                    <p class="text-sm">每周四晚上 11 点 Epic 会更新免费游戏</p>
-                    <a href="https://store.epicgames.com/zh-CN/free-games" target="_blank" class="inline-block mt-4 text-blue-400 hover:text-blue-300 text-base">前往 Epic 官网查看 →</a>
+                    <div id="free-games-empty" class="hidden text-center py-16 text-slate-500">
+                        <p class="text-lg font-semibold text-slate-700 mb-2">暂未获取到免费游戏</p>
+                        <p class="text-sm">Epic 通常会在每周四晚间更新免费促销。</p>
+                        <a href="https://store.epicgames.com/zh-CN/free-games" target="_blank" rel="noopener noreferrer" class="inline-block mt-4 text-blue-600 hover:text-blue-700 text-base">前往 Epic 官网查看 →</a>
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- 成功弹窗 -->
         <div id="success-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden">
-            <div class="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-2xl max-w-md w-full text-center modal-enter relative mx-4">
+            <div class="modal-card border p-6 shadow-2xl max-w-md w-full text-center modal-enter relative mx-4">
                 <div class="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
                     <svg class="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
                 </div>
-                <h3 class="text-xl font-bold text-white mb-2">领取成功!</h3>
-                <p class="text-slate-400 text-sm mb-4">Epic 自动驾驶已完成任务。</p>
-                <div class="bg-slate-800 rounded-xl p-4 mb-4">
-                    <p class="text-xs text-slate-500 uppercase">New Asset Acquired</p>
+                <h3 class="text-xl font-bold mb-2">领取成功</h3>
+                <p class="text-slate-400 text-sm mb-4">游戏已确认加入该账号资产。</p>
+                <div class="bg-slate-800 rounded-lg p-4 mb-4">
+                    <p class="text-xs text-slate-500">本次新增资产</p>
                     <p id="modal-game-name" class="text-lg font-bold text-blue-400 mt-1">Unknown Game</p>
                 </div>
                 <div class="flex flex-col gap-3">
@@ -626,7 +1226,7 @@
              用于显示需要用户手动操作的错误（如 EULA 失败）
              ============================================================ -->
         <div id="error-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden">
-            <div class="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-2xl max-w-md w-full text-center modal-enter relative mx-4">
+            <div class="modal-card border p-6 shadow-2xl max-w-md w-full text-center modal-enter relative mx-4">
                 <div id="error-modal-icon" class="w-16 h-16 bg-amber-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
                     <span class="text-3xl">⚠️</span>
                 </div>
@@ -677,7 +1277,6 @@
         {% raw %}
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
-            initParticles();
             loadRememberedEmail();
             fetchSystemStats();
             setInterval(fetchSystemStats, 30000);
@@ -691,40 +1290,6 @@
                 }
             }, 100);
         });
-
-        // 粒子背景
-        function initParticles() {
-            const canvas = document.getElementById('particles-canvas');
-            const ctx = canvas.getContext('2d');
-            let particles = [];
-            const particleCount = 50;
-
-            function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
-            resize();
-            window.addEventListener('resize', resize);
-
-            class Particle {
-                constructor() { this.reset(); }
-                reset() { this.x = Math.random() * canvas.width; this.y = Math.random() * canvas.height; this.vx = (Math.random() - 0.5) * 0.5; this.vy = (Math.random() - 0.5) * 0.5; this.radius = Math.random() * 2 + 0.5; this.opacity = Math.random() * 0.5 + 0.1; }
-                update() { this.x += this.vx; this.y += this.vy; if (this.x < 0 || this.x > canvas.width) this.vx *= -1; if (this.y < 0 || this.y > canvas.height) this.vy *= -1; }
-                draw() { ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fillStyle = `rgba(59, 130, 246, ${this.opacity})`; ctx.fill(); }
-            }
-
-            for (let i = 0; i < particleCount; i++) particles.push(new Particle());
-
-            function animate() {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                for (let i = 0; i < particles.length; i++) {
-                    for (let j = i + 1; j < particles.length; j++) {
-                        const dx = particles[i].x - particles[j].x, dy = particles[i].y - particles[j].y, dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist < 150) { ctx.beginPath(); ctx.moveTo(particles[i].x, particles[i].y); ctx.lineTo(particles[j].x, particles[j].y); ctx.strokeStyle = `rgba(59, 130, 246, ${0.1 * (1 - dist / 150)})`; ctx.stroke(); }
-                    }
-                }
-                particles.forEach(p => { p.update(); p.draw(); });
-                requestAnimationFrame(animate);
-            }
-            animate();
-        }
 
         // Toast
         function closeAnnouncement() {
@@ -740,9 +1305,32 @@
             const toast = document.createElement('div');
             toast.className = `toast toast-${type}`;
             const icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
-            toast.innerHTML = `<span class="text-lg">${icons[type]}</span><span>${message}</span>`;
+            const icon = document.createElement('span');
+            icon.className = 'text-lg';
+            icon.textContent = icons[type] || icons.info;
+            const text = document.createElement('span');
+            text.textContent = String(message);
+            toast.append(icon, text);
             container.appendChild(toast);
             setTimeout(() => { toast.classList.add('hiding'); setTimeout(() => toast.remove(), 250); }, duration);
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        function safeHttpUrl(value, fallback = '') {
+            try {
+                const url = new URL(String(value), window.location.origin);
+                return ['http:', 'https:'].includes(url.protocol) ? url.href : fallback;
+            } catch {
+                return fallback;
+            }
         }
 
         // 记住邮箱
@@ -787,6 +1375,7 @@
                     btn.className = 'tab-btn tab-btn-inactive';
                 }
             });
+            document.getElementById('stats-section').classList.toggle('hidden', tab !== 'deposit');
             document.getElementById('view-' + tab).classList.remove('hidden');
             if (tab === 'free-games') fetchFreeGames();
         }
@@ -799,17 +1388,21 @@
                 const res = await axios.get('/api/free_games');
                 skeleton.classList.add('hidden');
                 if (res.data.data.length === 0 || (res.data.data.length === 1 && !res.data.data[0].slug)) { empty.classList.remove('hidden'); return; }
-                grid.innerHTML = res.data.data.map(game => `
-                    <a href="${game.url}" target="_blank" class="free-game-card glass-panel rounded-2xl overflow-hidden block">
+                grid.innerHTML = res.data.data.map(game => {
+                    const gameUrl = safeHttpUrl(game.url, 'https://store.epicgames.com/zh-CN/free-games');
+                    const imageUrl = safeHttpUrl(game.image);
+                    const title = escapeHtml(game.title);
+                    return `
+                    <a href="${escapeHtml(gameUrl)}" target="_blank" rel="noopener noreferrer" class="free-game-card glass-panel rounded-2xl overflow-hidden block">
                         <div class="aspect-[16/9] relative overflow-hidden bg-slate-800">
-                            ${game.image ? `<img src="${game.image}" alt="${game.title}" class="w-full h-full object-cover hover:scale-105 transition-transform duration-500" onerror="this.parentElement.innerHTML='<div class=\\'w-full h-full flex items-center justify-center text-5xl\\'>🎮</div>'">` : '<div class="w-full h-full flex items-center justify-center text-5xl">🎮</div>'}
+                            ${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="${title}" class="w-full h-full object-cover hover:scale-105 transition-transform duration-500" onerror="this.remove()">` : '<div class="w-full h-full flex items-center justify-center text-5xl">🎮</div>'}
                         </div>
                         <div class="p-4">
-                            <h4 class="font-bold text-white text-lg mb-1 truncate">${game.title}</h4>
+                            <h4 class="font-bold text-white text-lg mb-1 truncate">${title}</h4>
                             <p class="text-sm text-green-400 font-semibold">限时免费领取</p>
                         </div>
                     </a>
-                `).join('');
+                `}).join('');
                 grid.classList.remove('hidden');
             } catch (e) { skeleton.classList.add('hidden'); empty.classList.remove('hidden'); showToast('获取免费游戏失败', 'error'); }
         }
@@ -820,10 +1413,17 @@
             return Promise.reject(error);
         });
 
-        function togglePwd(id, btn) { const el = document.getElementById(id); el.type = el.type === "password" ? "text" : "password"; btn.innerText = el.type === "password" ? "👁️" : "🔒"; }
+        function togglePwd(id, btn) {
+            const el = document.getElementById(id);
+            const reveal = el.type === 'password';
+            el.type = reveal ? 'text' : 'password';
+            btn.title = reveal ? '隐藏密码' : '显示密码';
+            btn.setAttribute('aria-label', btn.title);
+        }
 
         // 自动驾驶
         let pollTimer;
+        let confirmationToken = '';
         async function startVerify() {
             const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
             if (!email || !password) { showToast('请输入邮箱和密码', 'warning'); return; }
@@ -833,19 +1433,31 @@
             document.getElementById('work-area-container').classList.add('is-working');
             document.getElementById('status-panel-wrapper').classList.add('is-visible');
             document.getElementById('deposit-form').classList.add('opacity-50', 'pointer-events-none');
+            document.getElementById('task-summary-text').textContent = '正在提交账号并准备浏览器环境。';
 
             try {
                 const res = await axios.post('/api/deposit', { email, password });
+                if (res.data.status !== 'queued') {
+                    const type = res.data.status === 'busy' ? 'warning' : 'error';
+                    showToast(res.data.msg, type);
+                    document.getElementById('status-log').innerText = `> ${res.data.msg}`;
+                    resetUI();
+                    return;
+                }
+                confirmationToken = res.data.confirmation_token || '';
                 showToast(res.data.msg, 'success');
                 document.getElementById('status-log').innerText = `> ${res.data.msg}`;
                 pollTimer = setInterval(() => checkStatus(email, password), 1500);
-            } catch (e) { resetUI(); }
+            } catch (e) {
+                showToast(e.response?.data?.msg || '任务提交失败', 'error');
+                resetUI();
+            }
         }
 
         async function deleteAccount() {
             const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
             if (!email || !password) { showToast('请输入账号密码确认身份', 'warning'); return; }
-            if (!confirm('确定删除此账号托管？')) return;
+            if (!confirm('确定停止托管并删除该账号的本地登录信息吗？此操作不会删除 Epic 账号，但需要重新提交密码才能再次托管。')) return;
             try {
                 const res = await axios.post('/api/delete_account', { email, password });
                 showToast(res.data.msg, res.data.status === 'success' ? 'success' : 'error');
@@ -859,6 +1471,7 @@
                 const logDiv = document.getElementById('status-log');
                 const newLine = `\n> ${res.data.msg}`;
                 if (!logDiv.innerText.includes(res.data.msg)) logDiv.innerText = newLine + logDiv.innerText;
+                document.getElementById('task-summary-text').textContent = res.data.msg;
 
                 const result = res.data.result;
 
@@ -870,16 +1483,32 @@
                 // 成功领取新游戏
                 if (result === 'success_new') {
                     clearInterval(pollTimer);
-                    await axios.post('/api/confirm_success', { email, password });
-                    showModal(res.data.game_title || "Epic Free Game");
-                    showToast(`🎉 成功领取!`, 'success', 4000);
+                    try {
+                        await axios.post('/api/confirm_success', {
+                            email,
+                            password,
+                            confirmation_token: confirmationToken
+                        });
+                        showModal(res.data.game_title || "Epic Free Game");
+                        showToast(`🎉 成功领取!`, 'success', 4000);
+                    } catch {
+                        showToast('领取成功，但账号保存失败，请重新提交一次', 'warning', 6000);
+                    }
                     resetUI(); fetchSystemStats();
                 }
                 // 验证成功或已在库中
                 else if (result === 'success' || result === 'success_owned') {
                     clearInterval(pollTimer);
-                    await axios.post('/api/confirm_success', { email, password });
-                    showToast('任务完成！', 'success');
+                    try {
+                        await axios.post('/api/confirm_success', {
+                            email,
+                            password,
+                            confirmation_token: confirmationToken
+                        });
+                        showToast('任务完成！', 'success');
+                    } catch {
+                        showToast('任务完成，但账号保存失败，请重新提交一次', 'warning', 6000);
+                    }
                     resetUI(); fetchSystemStats();
                 }
                 // ============================================================
@@ -901,11 +1530,17 @@
         }
 
         function resetUI() {
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            confirmationToken = '';
             document.getElementById('deposit-form').classList.remove('opacity-50', 'pointer-events-none');
-            document.getElementById('btn-deposit').innerHTML = '<span class="text-xl">🚀</span><span>启动引擎</span>';
+            document.getElementById('btn-deposit').innerHTML = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5v14l11-7z"></path></svg><span>启动引擎</span>';
             // 🎬 恢复布局：工作区居中，隐藏日志面板
             document.getElementById('work-area-container').classList.remove('is-working');
             document.getElementById('status-panel-wrapper').classList.remove('is-visible');
+            document.getElementById('task-summary-text').textContent = '暂无运行中的任务。启动后会在这里显示关键进度。';
         }
 
         function showModal(gameName) {
@@ -950,10 +1585,31 @@
             },
             'captcha_failed': {
                 title: '验证码识别困难',
-                desc: '系统遇到了比较难的验证码，请稍后重试。如果多次失败，建议更换账号。',
+                desc: '系统暂时无法稳定通过验证码，已停止本次操作，稍后可以重新尝试。',
                 showSteps: false,
-                icon: '🤖',
-                iconBg: 'bg-purple-500/20'
+                icon: '!',
+                iconBg: 'bg-amber-500/20'
+            },
+            'captcha_manual_required': {
+                title: '需要人工完成验证码',
+                desc: 'Epic 触发了 hCaptcha 动物拖拽题。系统已停止自动重试，避免继续触发风控；请联系管理员人工完成一次登录后再重试。',
+                showSteps: true,
+                icon: '🧩',
+                iconBg: 'bg-amber-500/20'
+            },
+            'checkout_failed': {
+                title: '暂时无法确认领取结果',
+                desc: '验证码已经通过，但系统没有获得明确的入库结果。为避免误报成功，本次任务已停止，请稍后重试并检查 Epic 游戏库。',
+                showSteps: false,
+                icon: '!',
+                iconBg: 'bg-amber-500/20'
+            },
+            'unknown_error': {
+                title: '本次领取没有完成',
+                desc: '系统未能确认游戏已经入库。账号托管信息不会因此删除，请稍后再试。',
+                showSteps: false,
+                icon: '!',
+                iconBg: 'bg-amber-500/20'
             },
             'login_timeout': {
                 title: '登录超时',
@@ -1032,14 +1688,17 @@
                     else {
                         document.getElementById('empty-msg').classList.add('hidden');
                         logs.forEach(log => {
+                            const game = escapeHtml(log.game);
+                            const image = safeHttpUrl(log.image, '/images/default.jpg');
+                            const date = escapeHtml(String(log.time || '').split(' ')[0]);
                             grid.innerHTML += `
-                                <a href="https://store.epicgames.com/zh-CN/browse?q=${encodeURIComponent(log.game)}&sortBy=relevancy" target="_blank" class="game-card group relative bg-slate-800 rounded-xl overflow-hidden border border-slate-700 cursor-pointer block">
+                                <a href="https://store.epicgames.com/zh-CN/browse?q=${encodeURIComponent(log.game)}&sortBy=relevancy" target="_blank" rel="noopener noreferrer" class="game-card group relative bg-slate-800 rounded-xl overflow-hidden border border-slate-700 cursor-pointer block">
                                     <div class="aspect-[3/4] relative overflow-hidden">
-                                        <img src="${log.image}" alt="${log.game}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110 opacity-80 group-hover:opacity-100" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎮</text></svg>'">
+                                        <img src="${escapeHtml(image)}" alt="${game}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110 opacity-80 group-hover:opacity-100" onerror="this.remove()">
                                         <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent opacity-90"></div>
                                         <div class="absolute bottom-3 left-3 right-3">
-                                            <div class="text-xs font-mono text-green-400 mb-1 flex items-center"><span class="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>${log.time.split(' ')[0]}</div>
-                                            <h4 class="text-white font-bold text-sm leading-tight line-clamp-2">${log.game}</h4>
+                                            <div class="text-xs font-mono text-green-400 mb-1 flex items-center"><span class="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>${date}</div>
+                                            <h4 class="text-white font-bold text-sm leading-tight line-clamp-2">${game}</h4>
                                         </div>
                                     </div>
                                 </a>`;

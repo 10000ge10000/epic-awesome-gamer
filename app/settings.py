@@ -9,6 +9,7 @@ import sys
 import asyncio
 import base64
 import json
+import random
 from pathlib import Path
 from typing import Any, List, Union
 
@@ -45,7 +46,7 @@ class EpicSettings(AgentConfig):
 
     # 覆盖父类的 GEMINI_API_KEY，使其变为可选（本项目通过兼容层调用模型）
     GEMINI_API_KEY: SecretStr | None = Field(
-        default=SecretStr(""),
+        default_factory=lambda: os.getenv("GEMINI_API_KEY", "not_used"),
         description="Gemini API Key（本项目无需配置）",
     )
 
@@ -101,15 +102,66 @@ class EpicSettings(AgentConfig):
         description="空间路径推理模型 (image_drag_drop)",
     )
 
-    EPIC_EMAIL: str = Field(default_factory=lambda: os.getenv("EPIC_EMAIL"))
-    EPIC_PASSWORD: SecretStr = Field(default_factory=lambda: os.getenv("EPIC_PASSWORD"))
+    EPIC_EMAIL: str = Field(default_factory=lambda: os.getenv("EPIC_EMAIL", ""))
+    EPIC_PASSWORD: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("EPIC_PASSWORD", ""))
+    )
     DISABLE_BEZIER_TRAJECTORY: bool = Field(default=True)
 
     # === hcaptcha-challenger 超时配置 ===
+    # 单次验证码处理总超时（秒）
+    EXECUTION_TIMEOUT: float = Field(
+        default=float(os.getenv("HCAPTCHA_EXECUTION_TIMEOUT", "180")),
+        description="验证码处理总超时时间（秒）",
+    )
+
     # 验证码响应超时（秒）
     RESPONSE_TIMEOUT: float = Field(
-        default=60.0,
+        default=float(os.getenv("HCAPTCHA_RESPONSE_TIMEOUT", "90")),
         description="验证码响应超时时间（秒）"
+    )
+
+    # Epic 结账页的 hCaptcha iframe 渲染有抖动，默认 1.5s 偏短。
+    WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS: int = Field(
+        default=int(os.getenv("HCAPTCHA_RENDER_WAIT_MS", "3000")),
+        description="等待验证码视图渲染的时间（毫秒）",
+    )
+
+    ignore_request_questions: list[str] = Field(
+        default_factory=lambda: [
+            item.strip()
+            for item in os.getenv(
+                "HCAPTCHA_IGNORE_QUESTIONS",
+                "",
+            ).split("||")
+            if item.strip()
+        ],
+        description="hCaptcha questions to refresh instead of solving",
+    )
+    RETRY_ON_FAILURE: bool = Field(default=True)
+    enable_challenger_debug: bool = Field(
+        default=os.getenv("HCAPTCHA_DEBUG", "true").lower() in {"1", "true", "yes", "on"}
+    )
+
+    CAPTCHA_PROVIDER: str = Field(
+        default=os.getenv("CAPTCHA_PROVIDER", "none").lower(),
+        description="验证码服务商 fallback：none / 2captcha",
+    )
+    CAPTCHA_PROVIDER_API_KEY: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("CAPTCHA_PROVIDER_API_KEY", "")),
+        description="验证码服务商 API Key",
+    )
+    CAPTCHA_PROVIDER_SITE_KEY: str = Field(
+        default=os.getenv("CAPTCHA_PROVIDER_SITE_KEY", "91e4137f-95af-4bc9-97af-cdcedce21c8c"),
+        description="Epic 登录页 hCaptcha sitekey",
+    )
+    CAPTCHA_PROVIDER_TIMEOUT: int = Field(
+        default=int(os.getenv("CAPTCHA_PROVIDER_TIMEOUT", "180")),
+        description="验证码服务商等待超时（秒）",
+    )
+    CAPTCHA_PROVIDER_POLL_INTERVAL: int = Field(
+        default=int(os.getenv("CAPTCHA_PROVIDER_POLL_INTERVAL", "5")),
+        description="验证码服务商轮询间隔（秒）",
     )
 
     # 禁用 hcaptcha 文件保存（使用 /tmp 临时目录）
@@ -131,7 +183,6 @@ class EpicSettings(AgentConfig):
         return target_
 
 settings = EpicSettings()
-settings.ignore_request_questions = ["Please drag the crossing to complete the lines"]
 
 # 记录当前配置
 logger.info(f"🎯 API 提供商: {API_PROVIDER}")
@@ -318,12 +369,15 @@ def _apply_openai_compatible_patch():
             调用 OpenAI 兼容 API
             注意：不使用 response_format，因为部分视觉模型不支持
             """
-            url = f"{base_url}/v1/chat/completions"
+            request_base_url = base_url
+            use_opencode_free = str(model).endswith("-free")
+            if use_opencode_free:
+                request_base_url = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/zen").rstrip("/")
+            url = f"{request_base_url}/v1/chat/completions"
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
+            headers = {"Content-Type": "application/json"}
+            if not use_opencode_free and os.getenv("OPENCODE_NO_AUTH", "").lower() not in {"1", "true", "yes", "on"}:
+                headers["Authorization"] = f"Bearer {api_key}"
 
             # 构建消息列表
             final_messages = []
@@ -336,15 +390,43 @@ def _apply_openai_compatible_patch():
             if response_schema:
                 schema_json = response_schema.model_json_schema()
                 schema_str = json.dumps(schema_json, indent=2, ensure_ascii=False)
+                spatial_instruction = ""
+                if getattr(response_schema, "__name__", "") == "ImageAreaSelectChallenge":
+                    spatial_instruction = """
+坐标任务额外要求：
+- 使用图片上标注的 X/Y 坐标轴读数，不要使用图片像素尺寸。
+- 坐标必须落在目标物体的中心区域，不要点击边缘、空白、坐标轴或标题。
+- 先比较所有候选目标，再估算目标完整包围框的左、右、上、下边界。
+- 返回包围框的算术中心；花朵任务应点击花瓣汇聚的中心核心，绝不点击花瓣尖端。"""
+                elif getattr(response_schema, "__name__", "") == "ImageDragDropChallenge":
+                    spatial_instruction = """
+Drag-and-drop coordinate rules:
+- Drag only the movable animal icons in the left source column marked Move; start_point must be the center of a left source icon.
+- end_point must be the center of an empty cell in the right grid; never drop onto a cell that already contains an animal icon.
+- Do not use the left source column as a target area. The target is usually to the right of the source, so end_point.x should be clearly larger than start_point.x.
+- Return coordinates in the full browser screenshot coordinate system used by the captcha page, not cropped-image coordinates.
+- Every coordinate must be inside the visible hCaptcha panel. Do not return negative coordinates or coordinates outside the screenshot.
+- Use at most one path for each movable source icon. If two source icons are needed, return exactly two paths.
+- First infer the row and column pattern of the target grid and locate the empty cells, then place the matching animal in the center of the missing cell.
+- Treat the target as a 4x4 grid when animal icons form four rows and four columns. The left source column is outside the 4x4 target grid.
+- Empty cells are background-only squares inside the right grid. Existing animal cells already contain an icon and must not be used as end_point.
+- Solve by table completion: write the animal type of every visible cell in the right grid, mark blanks as EMPTY, then infer each EMPTY from the repeated row/column pattern.
+- Only choose an EMPTY cell if its inferred animal type matches one of the movable source icons.
+- Common pattern example: if complete rows use [octopus, chicken, duck, frog] and a row is [octopus, EMPTY, duck, EMPTY], then column 2 requires chicken and column 4 requires frog.
+- Common pattern example: if rows are [duck, bear, penguin, octopus] and a row is [duck, EMPTY, penguin, EMPTY], then column 2 requires bear and column 4 requires octopus.
+- If the source icons are octopus and penguin, drag octopus only to the EMPTY cell whose row/column requires octopus, and penguin only to the EMPTY cell whose row/column requires penguin.
+- Do not choose a visually empty cell simply because it is empty; it must also match the source animal and complete the pattern."""
                 schema_instruction = f"""你必须严格按照以下 JSON Schema 格式返回响应。
 返回的 JSON 必须包含在 ```json 代码块中。
+不要输出分析过程、思考过程、解释文字或 Markdown 标题；只返回一个 ```json 代码块。
 
 JSON Schema:
 ```json
 {schema_str}
 ```
 
-重要：请确保返回有效的 JSON 格式，包含在代码块中。"""
+重要：请确保返回有效的 JSON 格式，包含在代码块中。
+{spatial_instruction}"""
                 if final_messages and final_messages[0].get("role") == "system":
                     final_messages[0]["content"] += "\n\n" + schema_instruction
                 else:
@@ -360,16 +442,35 @@ JSON Schema:
                 # 注意：不使用 response_format，部分视觉模型不支持
             }
 
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(url, headers=headers, json=payload)
+            retryable_statuses = {429, 500, 502, 503, 504}
+            last_error = None
+            is_structured_captcha = response_schema is not None
+            api_timeout = float(os.getenv("CAPTCHA_API_TIMEOUT", "45")) if is_structured_captcha else 120.0
+            max_attempts = int(os.getenv("CAPTCHA_API_RETRIES", "1")) if is_structured_captcha else 3
 
-                if response.status_code != 200:
-                    error_msg = f"API 调用失败: {response.status_code} - {response.text}"
-                    logger.error(f"❌ {error_msg}")
-                    raise Exception(error_msg)
+            async with httpx.AsyncClient(timeout=api_timeout) as client:
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        response = await client.post(url, headers=headers, json=payload)
+                        if response.status_code == 200:
+                            return response.json()
 
-                result = response.json()
-                return result
+                        error_msg = f"API 调用失败: {response.status_code} - {response.text}"
+                        last_error = Exception(error_msg)
+                        logger.error(f"❌ {error_msg}")
+                        if response.status_code not in retryable_statuses or attempt == max_attempts:
+                            raise last_error
+                    except httpx.HTTPError as exc:
+                        last_error = exc
+                        logger.error(f"❌ API 网络异常: {exc}")
+                        if attempt == max_attempts:
+                            raise
+
+                    delay = min(2 ** (attempt - 1), 4) + random.uniform(0, 0.5)
+                    logger.warning(f"⏳ API 调用失败，{delay:.1f}s 后重试 [{attempt}/{max_attempts}]")
+                    await asyncio.sleep(delay)
+
+            raise last_error or RuntimeError("API 调用失败")
 
         # ==========================================
         # 劫持 Client 初始化
@@ -400,8 +501,8 @@ JSON Schema:
             'success_count': 0,       # 成功次数
             'failure_count': 0,       # 失败次数（通过调用频率推断）
         }
-        CAPTCHA_FAILURE_THRESHOLD = 2  # 连续调用超过此次数后切换备用模型
-        CAPTCHA_TIME_WINDOW = 60       # 时间窗口（秒），超过此时间重置计数
+        CAPTCHA_FAILURE_THRESHOLD = int(os.getenv("CAPTCHA_FALLBACK_AFTER_CALLS", "0"))
+        CAPTCHA_TIME_WINDOW = int(os.getenv("CAPTCHA_FALLBACK_TIME_WINDOW", "300"))
 
         async def patched_upload(self_files, file, **kwargs):
             """将文件内容存储到内存缓存，返回伪造的文件 ID"""
@@ -484,7 +585,7 @@ JSON Schema:
 
                     # 判断是否应该使用备用模型
                     # 当连续调用次数超过阈值时，切换到备用模型
-                    if captcha_call_state['call_count'] > CAPTCHA_FAILURE_THRESHOLD:
+                    if CAPTCHA_FAILURE_THRESHOLD > 0 and captcha_call_state['call_count'] > CAPTCHA_FAILURE_THRESHOLD:
                         captcha_call_state['use_fallback'] = True
                         logger.info(f"🔄 验证码重试次数过多（{captcha_call_state['call_count']}次），切换到备用模型")
                         selected_model = settings.CAPTCHA_MODEL_FALLBACK
@@ -507,6 +608,8 @@ JSON Schema:
                 if hasattr(config, 'response_schema'):
                     response_schema = config.response_schema
                     logger.debug(f"📋 检测到 response_schema: {response_schema.__name__ if hasattr(response_schema, '__name__') else response_schema}")
+                    max_tokens = min(max_tokens if isinstance(max_tokens, int) else 4096, int(os.getenv("CAPTCHA_RESPONSE_MAX_TOKENS", "1200")))
+                    temperature = min(temperature if isinstance(temperature, (int, float)) else 0.7, 0.2)
 
                 # 提取 system_instruction
                 system_instruction = None
@@ -528,7 +631,14 @@ JSON Schema:
                 )
 
                 # 提取响应文本
-                response_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                message = result.get('choices', [{}])[0].get('message', {})
+                response_text = message.get('content') or message.get('reasoning') or ''
+                if not response_text and message.get('reasoning_details'):
+                    response_text = "\n".join(
+                        str(item.get('text', ''))
+                        for item in message.get('reasoning_details', [])
+                        if isinstance(item, dict)
+                    )
                 logger.debug(f"📄 原始响应: {repr(response_text[:300])}")
 
                 # 处理结构化输出
@@ -582,7 +692,14 @@ JSON Schema:
                         system_instruction=system_instruction,
                     )
 
-                    response_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                    message = result.get('choices', [{}])[0].get('message', {})
+                    response_text = message.get('content') or message.get('reasoning') or ''
+                    if not response_text and message.get('reasoning_details'):
+                        response_text = "\n".join(
+                            str(item.get('text', ''))
+                            for item in message.get('reasoning_details', [])
+                            if isinstance(item, dict)
+                        )
                     logger.debug(f"📄 备用模型响应: {repr(response_text[:300])}")
 
                     # 处理结构化输出

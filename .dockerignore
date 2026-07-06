@@ -22,21 +22,14 @@ ENV/
 *.egg
 .eggs/
 
-# 用户数据（不应打包进镜像）
-data/user_data/
-data/kiosk.db
-data/images/*.jpg
-data/images/*.png
-data/logs/
-data/runtime/
-
-# 保留必要的目录标记
-!data/images/.gitkeep
-!data/logs/.gitkeep
+# 用户数据（运行时通过 volume 挂载，不应进入镜像）
+data/
 
 # IDE 和编辑器
 .vscode/
 .idea/
+.agents/
+.codex/
 *.swp
 *.swo
 *~
