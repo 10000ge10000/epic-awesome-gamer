@@ -114,6 +114,39 @@ class SecurityQueueTests(unittest.IsolatedAsyncioTestCase):
             await self.main.save_account(account)
         self.assertEqual(reused.exception.status_code, 401)
 
+    def test_public_crawler_metadata_endpoints(self):
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self.main.app)
+
+        robots = client.get("/robots.txt")
+        self.assertEqual(robots.status_code, 200)
+        self.assertIn("Disallow: /api/", robots.text)
+        self.assertIn("Sitemap: https://epic.910501.xyz/sitemap.xml", robots.text)
+
+        sitemap = client.get("/sitemap.xml")
+        self.assertEqual(sitemap.status_code, 200)
+        self.assertIn("<loc>https://epic.910501.xyz/</loc>", sitemap.text)
+
+        llms = client.get("/llms.txt")
+        self.assertEqual(llms.status_code, 200)
+        self.assertNotIn("Oracle-1", llms.text)
+        self.assertNotIn("OPERATIONS.md", llms.text)
+        self.assertNotIn("/opt/", llms.text)
+
+        security_root = client.get("/security.txt")
+        security_well_known = client.get("/.well-known/security.txt")
+        self.assertEqual(security_root.status_code, 200)
+        self.assertEqual(security_well_known.status_code, 200)
+        self.assertIn("github.com/10000ge10000/epic-kiosk", security_root.text)
+
+    def test_noisy_css_url_path_returns_no_content(self):
+        from fastapi.testclient import TestClient
+
+        client = TestClient(self.main.app)
+        response = client.get("/url%28%27https%3A//fonts.googleapis.com/css2")
+        self.assertEqual(response.status_code, 204)
+
 
 if __name__ == "__main__":
     unittest.main()

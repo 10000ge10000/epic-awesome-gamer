@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import worker
 
@@ -138,6 +140,66 @@ class WorkerResultTests(unittest.TestCase):
         worker.terminate_process_group(process)
         if process.stdout:
             process.stdout.close()
+
+    def test_restart_warp_control_503_uses_bounded_container_fallback(self):
+        response = SimpleNamespace(status_code=503, text="busy")
+        completed = SimpleNamespace(returncode=0, stdout="epic-warp\\n", stderr="")
+
+        with (
+            patch.object(worker, "WARP_CONTROL_URL_TEMPLATE", "http://epic-warp:18080/restart/{idx}"),
+            patch.object(worker, "WARP_CONTROL_RESTART_RETRIES", 3),
+            patch.object(worker, "WARP_CONTROL_RESTART_BACKOFF_SECONDS", 1),
+            patch.object(worker, "WARP_CONTAINER_FALLBACK_RESTARTS", 1),
+            patch.object(worker, "request_warp_control", return_value=response) as control,
+            patch.object(worker, "wait_for_warp_recovery", side_effect=[False, False, False, True]) as wait,
+            patch.object(worker.subprocess, "run", return_value=completed) as run,
+            patch.object(worker.time, "sleep"),
+        ):
+            self.assertTrue(worker.restart_warp_container(4))
+
+        self.assertEqual(control.call_count, 3)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(wait.call_count, 4)
+
+    def test_wait_for_warp_recovery_accepts_proxy_when_health_is_busy(self):
+        with (
+            patch.object(worker, "_control_health_reports_ready", return_value=(False, "health status=503")) as health,
+            patch.object(worker, "check_warp_proxy", return_value=(True, "104.28.0.1")) as check,
+        ):
+            self.assertTrue(worker.wait_for_warp_recovery(4, timeout_seconds=1))
+
+        self.assertEqual(health.call_count, 1)
+        self.assertEqual(check.call_count, 1)
+
+    def test_request_warp_control_ignores_environment_proxy(self):
+        with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9"}):
+            with patch.object(worker.requests, "Session") as session_cls:
+                session = session_cls.return_value.__enter__.return_value
+                session.request.return_value = SimpleNamespace(status_code=200, text="ok")
+
+                response = worker.request_warp_control("GET", "http://epic-warp:18080/health", timeout=3)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(session.trust_env)
+        session.request.assert_called_once_with("GET", "http://epic-warp:18080/health", timeout=3)
+
+    def test_ensure_warp_ready_runs_recovery_once_per_check_cycle(self):
+        with (
+            patch.dict(os.environ, {"HTTP_PROXY": "http://epic-warp:19000"}),
+            patch.object(worker, "WARP_MAX_RETRIES", 4),
+            patch.object(worker, "WARP_CONTROL_RESTART_BACKOFF_SECONDS", 1),
+            patch.object(
+                worker,
+                "check_warp_proxy",
+                side_effect=[(False, "down"), (False, "starting"), (True, "104.28.0.1")],
+            ),
+            patch.object(worker, "restart_warp_container", return_value=False) as restart,
+            patch.object(worker.time, "sleep"),
+        ):
+            self.assertTrue(worker.ensure_warp_ready(4))
+
+        self.assertEqual(restart.call_count, 1)
+
 
     @staticmethod
     def _process_exists(pid):

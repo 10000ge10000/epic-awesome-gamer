@@ -112,6 +112,16 @@ epic-warp:19000-19009
 
 Worker 会根据账号邮箱稳定选择一个 WARP index，并把 `HTTP_PROXY` / `HTTPS_PROXY` 注入本次浏览器任务。网络超时或浏览器驱动异常时，系统优先重启对应 index，而不是重启整个 WARP 容器。
 
+可调恢复参数：
+
+```env
+WARP_CONTROL_RESTART_RETRIES=3
+WARP_CONTROL_RESTART_BACKOFF_SECONDS=5
+WARP_CONTAINER_FALLBACK_RESTARTS=1
+```
+
+WARP 控制接口请求会显式绕过 `HTTP_PROXY` / `HTTPS_PROXY`，避免 Worker 调用 `epic-warp:18080` 时被自己的 WARP 代理劫持。当控制接口短暂返回 `503` 时，Worker 会先退避，并同时检查 `/health` 与代理端口连通性；只有单出口恢复失败时，才最多执行一次整容器兜底重启。
+
 ### 任务恢复
 
 - 验证码失败：默认延迟 15 分钟重试，最多 2 次。
@@ -153,15 +163,12 @@ epic-kiosk/
 
 ## 升级
 
-Oracle-1 生产实例默认路径：
+进入你的项目目录后执行：
 
 ```bash
-cd /opt/epic-kiosk
 git pull
 docker compose up -d --build
 ```
-
-普通手动部署用户请进入自己的项目目录后执行同样命令。
 
 仅重建 Worker：
 
@@ -194,6 +201,8 @@ tail -50 data/logs/runtime-$(date +%Y-%m-%d).log
 - API 返回 `404`：模型 ID 不存在，或当前账号无权调用该模型。
 - 验证码一直失败：先看 Worker 日志中的模型名、API 错误码和 WARP 重启记录，再判断是模型能力、Provider 权限还是 Epic 风控。
 - `Requires Base Game`：该免费项是 DLC，需要先拥有基础游戏，系统会跳过或记录失败原因。
+- WARP 控制接口短暂 `503`：Worker 调用控制接口时会绕过环境代理，并按 `WARP_CONTROL_RESTART_RETRIES` 和 `WARP_CONTROL_RESTART_BACKOFF_SECONDS` 退避重试，同时检查 `/health` 与代理端口连通性，避免连续重启整个 `epic-warp` 容器。
+- 爬虫访问 `robots.txt`、`sitemap.xml`、`llms.txt`、`security.txt`：这些公开元文件会返回 200；明显错误的 CSS `url(...)` 路径会返回 204，以减少无意义 404 日志。
 
 ## 相关文档
 

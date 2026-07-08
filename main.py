@@ -10,7 +10,7 @@ import secrets
 import hashlib
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -29,6 +29,7 @@ DB_PATH = os.path.join(DATA_DIR, "kiosk.db")
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
 TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "86400"))
 CONFIRM_TOKEN_SECONDS = int(os.getenv("CONFIRM_TOKEN_SECONDS", "86400"))
+PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "https://epic.910501.xyz").rstrip("/")
 
 # 历史数据偏移量配置（通过环境变量设置，默认为 0）
 # 用于补偿因入库 API 失效丢失的历史记录
@@ -118,6 +119,11 @@ async def anti_abuse_middleware(request: Request, call_next):
     if any(path == prefix or path.startswith(f"{prefix}/") for prefix in sensitive_prefixes):
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
+    # Some crawlers incorrectly request CSS url(...) fragments as paths.
+    # Return an empty success response to reduce noisy 404 logs without affecting the UI.
+    if path.startswith("/url(") or path.startswith("/url%28"):
+        return Response(status_code=204)
+
     # 仅针对"提交任务/启动引擎"接口进行限制
     if request.url.path == "/api/deposit" and request.method == "POST":
         client_ip = request.client.host
@@ -155,6 +161,77 @@ async def anti_abuse_middleware(request: Request, call_next):
 
     response = await call_next(request)
     return response
+
+
+# --- Public crawler metadata endpoints ---
+def _public_url(path: str = "") -> str:
+    if not path:
+        return PUBLIC_SITE_URL
+    return f"{PUBLIC_SITE_URL}/{path.lstrip('/')}"
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt():
+    content = "\n".join([
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /api/",
+        "Disallow: /data/",
+        "Disallow: /.env",
+        "Disallow: /.git",
+        "Disallow: /app/volumes/",
+        f"Sitemap: {_public_url('sitemap.xml')}",
+        "",
+    ])
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    today = datetime.utcnow().date().isoformat()
+    content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>{_public_url('/')}</loc>
+    <lastmod>{today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+  </url>
+</urlset>
+'''
+    return Response(content=content, media_type="application/xml; charset=utf-8")
+
+
+@app.get("/llms.txt", response_class=PlainTextResponse)
+async def llms_txt():
+    content = f'''# Epic Kiosk
+
+Epic Kiosk is a public web console for an open-source Epic Games weekly free-game automation project.
+
+Public links:
+- Site: {_public_url('/')}
+- GitHub: https://github.com/10000ge10000/epic-kiosk
+- Blog: https://blog.910501.xyz/
+
+Crawler notes:
+- Public page: /
+- API, runtime data, private configuration, and repository internals are not intended for crawling.
+'''
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/security.txt", response_class=PlainTextResponse)
+@app.get("/.well-known/security.txt", response_class=PlainTextResponse)
+async def security_txt():
+    expires = (datetime.utcnow() + timedelta(days=365)).date().isoformat()
+    content = "\n".join([
+        "Contact: https://github.com/10000ge10000/epic-kiosk/issues",
+        "Preferred-Languages: zh, en",
+        f"Canonical: {_public_url('.well-known/security.txt')}",
+        f"Expires: {expires}T00:00:00Z",
+        "",
+    ])
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
 
 # --- 🛠️ 内部工具函数：物理删除逻辑 ---
 def _perform_physical_delete(email):
