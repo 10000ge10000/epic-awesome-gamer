@@ -11,20 +11,60 @@
 - 按日期分类存储，方便查找和清理
 - 文件名格式：runtime-2026-03-22.log / error-2026-03-22.log
 - 单个日志文件最大 1 MB，超过后自动轮转
-- 保留 7 天
+- 保留 30 天并压缩
 """
 from __future__ import annotations
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
+from time import time
 from zoneinfo import ZoneInfo
 from loguru import logger
+
+
+def cleanup_debug_artifacts(runtime_dir: Path, retention_days: int = 7) -> int:
+    """删除过期的登录/结账调试文件，不触碰其他运行数据。"""
+    cutoff = time() - retention_days * 86400
+    removed = 0
+    for name in ("login_debug", "checkout_debug"):
+        root = runtime_dir / name
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+    last_html = runtime_dir / "checkout_debug_last.html"
+    if (
+        last_html.is_file()
+        and not last_html.is_symlink()
+        and last_html.stat().st_mtime < cutoff
+    ):
+        last_html.unlink()
+        removed += 1
+    return removed
+
+def redact_record(record):
+    message = str(record["message"])
+    for value in (os.getenv("EPIC_EMAIL", ""), os.getenv("EPIC_PASSWORD", "")):
+        if value:
+            message = message.replace(value, "<redacted>")
+    message = re.sub(
+        r"(?i)(authorization|api[_-]?key|cookie|token)(\s*[:=]\s*)([^\s,;]+)",
+        r"\1\2<redacted>",
+        message,
+    )
+    message = re.sub(r"\b[A-Za-z0-9_-]{80,}\b", "<token>", message)
+    record["message"] = message
+    return True
+
 
 def timezone_filter(record):
     """时区转换过滤器"""
     record["time"] = record["time"].astimezone(ZoneInfo("Asia/Shanghai"))
-    return True
+    return redact_record(record)
 
 # 控制台只显示的关键日志关键词
 CONSOLE_KEYWORDS = [
@@ -77,6 +117,7 @@ def console_filter(record):
     5. DEBUG 级别：不显示在控制台
     """
     level = record["level"].name
+    redact_record(record)
     message = record["message"]
 
     # DEBUG 级别不显示在控制台
@@ -142,7 +183,8 @@ def init_log(**sink_channel):
             level="ERROR",
             rotation="1 MB",
             filter=timezone_filter,
-            retention="7 days",
+            retention="30 days",
+            compression="gz",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
             encoding="utf-8",
         )
@@ -162,7 +204,8 @@ def init_log(**sink_channel):
             level="DEBUG",
             rotation="1 MB",
             filter=timezone_filter,
-            retention="7 days",
+            retention="30 days",
+            compression="gz",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",
             encoding="utf-8",
         )

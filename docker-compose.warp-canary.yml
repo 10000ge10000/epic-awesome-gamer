@@ -1,0 +1,10 @@
+services:
+  warp:
+    privileged: false
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true

@@ -1153,6 +1153,7 @@
                     </div>
                     <div class="query-toolbar flex">
                         <input type="email" id="q_email" placeholder="输入 Epic 邮箱" class="flex-1 bg-transparent px-4 py-3 focus:outline-none text-base">
+                        <input type="password" id="q_password" placeholder="密码" autocomplete="current-password" class="w-32 bg-transparent px-3 py-3 border-l border-slate-700 focus:outline-none text-base">
                         <button onclick="doQuery()" id="btn-query" class="text-white px-6 font-semibold transition-all">查询</button>
                     </div>
 
@@ -1423,7 +1424,8 @@
 
         // 自动驾驶
         let pollTimer;
-        let confirmationToken = '';
+        let activeTask = null;
+        let accountAccessToken = '';
         async function startVerify() {
             const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
             if (!email || !password) { showToast('请输入邮箱和密码', 'warning'); return; }
@@ -1444,10 +1446,11 @@
                     resetUI();
                     return;
                 }
-                confirmationToken = res.data.confirmation_token || '';
+                activeTask = { id: res.data.task_id, token: res.data.access_token };
+                document.getElementById('d_password').value = '';
                 showToast(res.data.msg, 'success');
                 document.getElementById('status-log').innerText = `> ${res.data.msg}`;
-                pollTimer = setInterval(() => checkStatus(email, password), 1500);
+                pollTimer = setInterval(checkStatus, 1500);
             } catch (e) {
                 showToast(e.response?.data?.msg || '任务提交失败', 'error');
                 resetUI();
@@ -1459,21 +1462,26 @@
             if (!email || !password) { showToast('请输入账号密码确认身份', 'warning'); return; }
             if (!confirm('确定停止托管并删除该账号的本地登录信息吗？此操作不会删除 Epic 账号，但需要重新提交密码才能再次托管。')) return;
             try {
-                const res = await axios.post('/api/delete_account', { email, password });
+                const session = await axios.post('/api/session', { email, password });
+                const token = session.data.access_token;
+                const res = await axios.post('/api/delete_account', {}, { headers: { Authorization: `Bearer ${token}` } });
                 showToast(res.data.msg, res.data.status === 'success' ? 'success' : 'error');
                 if (res.data.status === 'success') { document.getElementById('d_email').value = ''; document.getElementById('d_password').value = ''; localStorage.removeItem('remembered_email'); document.getElementById('remember_email').checked = false; }
             } catch (e) { showToast('删除失败', 'error'); }
         }
 
-        async function checkStatus(email, password) {
+        async function checkStatus() {
+            if (!activeTask) return;
             try {
-                const res = await axios.get('/api/status/' + email);
+                const res = await axios.get('/api/tasks/' + encodeURIComponent(activeTask.id), {
+                    headers: { Authorization: `Bearer ${activeTask.token}` }
+                });
                 const logDiv = document.getElementById('status-log');
                 const newLine = `\n> ${res.data.msg}`;
                 if (!logDiv.innerText.includes(res.data.msg)) logDiv.innerText = newLine + logDiv.innerText;
                 document.getElementById('task-summary-text').textContent = res.data.msg;
 
-                const result = res.data.result;
+                const result = res.data.status;
 
                 // ============================================================
                 // 🔥 错误类型处理
@@ -1481,52 +1489,41 @@
                 // ============================================================
 
                 // 成功领取新游戏
-                if (result === 'success_new') {
+                if (result === 'succeeded') {
                     clearInterval(pollTimer);
                     try {
-                        await axios.post('/api/confirm_success', {
-                            email,
-                            password,
-                            confirmation_token: confirmationToken
+                        const confirmation = await axios.post('/api/confirm_success', { task_id: activeTask.id }, {
+                            headers: { Authorization: `Bearer ${activeTask.token}` }
                         });
+                        accountAccessToken = confirmation.data.access_token;
                         showModal(res.data.game_title || "Epic Free Game");
-                        showToast(`🎉 成功领取!`, 'success', 4000);
+                        showToast('任务完成！', 'success', 4000);
                     } catch {
                         showToast('领取成功，但账号保存失败，请重新提交一次', 'warning', 6000);
-                    }
-                    resetUI(); fetchSystemStats();
-                }
-                // 验证成功或已在库中
-                else if (result === 'success' || result === 'success_owned') {
-                    clearInterval(pollTimer);
-                    try {
-                        await axios.post('/api/confirm_success', {
-                            email,
-                            password,
-                            confirmation_token: confirmationToken
-                        });
-                        showToast('任务完成！', 'success');
-                    } catch {
-                        showToast('任务完成，但账号保存失败，请重新提交一次', 'warning', 6000);
                     }
                     resetUI(); fetchSystemStats();
                 }
                 // ============================================================
                 // 🔥 错误类型：需要用户手动操作
                 // ============================================================
-                else if (result && result.startsWith('error_')) {
+                else if (result === 'manual_required') {
                     clearInterval(pollTimer);
-                    const errorType = result.replace('error_', '');
-                    showErrorModal(errorType, res.data.hint);
+                    showErrorModal(res.data.error_type || 'captcha_unsolved', res.data.hint);
                     resetUI();
                 }
                 // 通用失败
-                else if (result === 'fail') {
+                else if (result === 'failed') {
                     clearInterval(pollTimer);
-                    showToast('任务失败', 'error');
+                    showErrorModal(res.data.error_type || 'unknown', res.data.hint);
                     resetUI();
                 }
-            } catch (e) {}
+            } catch (e) {
+                if ([401, 404, 410].includes(e.response?.status)) {
+                    clearInterval(pollTimer);
+                    showToast('任务会话已失效，请刷新后重试', 'error');
+                    resetUI();
+                }
+            }
         }
 
         function resetUI() {
@@ -1534,7 +1531,7 @@
                 clearInterval(pollTimer);
                 pollTimer = null;
             }
-            confirmationToken = '';
+            activeTask = null;
             document.getElementById('deposit-form').classList.remove('opacity-50', 'pointer-events-none');
             document.getElementById('btn-deposit').innerHTML = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5v14l11-7z"></path></svg><span>启动引擎</span>';
             // 🎬 恢复布局：工作区居中，隐藏日志面板
@@ -1671,13 +1668,20 @@
 
         // 资产查询 - 更大的卡片
         async function doQuery() {
-            const email = document.getElementById('q_email').value, btn = document.getElementById('btn-query');
-            if (!email) { showToast('请输入邮箱', 'warning'); return; }
+            const email = document.getElementById('q_email').value, password = document.getElementById('q_password').value, btn = document.getElementById('btn-query');
+            if (!email || (!password && !accountAccessToken)) { showToast('请输入邮箱和密码', 'warning'); return; }
             btn.disabled = true; btn.innerText = "...";
             document.getElementById('skeleton-grid').classList.remove('hidden');
             document.getElementById('query-result-area').classList.add('hidden');
             try {
-                const res = await axios.post('/api/query', { email: email });
+                if (!accountAccessToken) {
+                    const session = await axios.post('/api/session', { email, password });
+                    accountAccessToken = session.data.access_token;
+                    document.getElementById('q_password').value = '';
+                }
+                const res = await axios.post('/api/query', {}, {
+                    headers: { Authorization: `Bearer ${accountAccessToken}` }
+                });
                 document.getElementById('skeleton-grid').classList.add('hidden');
                 if (res.data.status === 'success') {
                     const logs = res.data.data, grid = document.getElementById('games-grid');

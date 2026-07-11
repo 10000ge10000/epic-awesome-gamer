@@ -17,22 +17,40 @@ import hashlib
 from contextlib import suppress
 from bs4 import BeautifulSoup
 
+from app.secure_store import (
+    CredentialCipher,
+    account_ref,
+    connect,
+    cycle_run_dispatch_status,
+    load_task_context,
+    mark_cycle_complete_if_ready,
+    read_secret,
+    record_game_result,
+    safe_profile_path,
+    task_cycle_is_active,
+    update_task,
+)
+
 # Redis
 redis_host = os.getenv("REDIS_HOST", "localhost")
 r = redis.Redis(host=redis_host, port=6379, decode_responses=True)
 WEB_BASE_URL = "http://web:8000"
 WEB_API_URL = f"{WEB_BASE_URL}/api/report_game"
 NUKE_API_URL = f"{WEB_BASE_URL}/api/nuke_account" # 核弹接口
-INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+INTERNAL_API_TOKEN = read_secret("INTERNAL_API_TOKEN", "INTERNAL_API_TOKEN_FILE")
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "kiosk.db"))
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "900"))
+TASK_SOFT_TIMEOUT_SECONDS = int(os.getenv("TASK_SOFT_TIMEOUT_SECONDS", "480"))
 TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "86400"))
+TASK_MIN_GAME_BUDGET_SECONDS = int(os.getenv("TASK_MIN_GAME_BUDGET_SECONDS", "180"))
 
-IMAGES_DIR = "/app/data/images"
+IMAGES_DIR = os.path.join(DATA_DIR, "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 # 定义清理路径
 PATHS_TO_CHECK = [
-    "/app/data/user_data",
+    os.path.join(DATA_DIR, "user_data"),
     "/app/app/volumes/user_data"
 ]
 
@@ -54,6 +72,7 @@ EPIC_TEST_TIMEOUT = 10  # 秒
 # 验证码失败恢复策略
 # ============================================================
 RETRY_QUEUE = "task_retry_queue"
+SCHEDULED_TASK_QUEUE = "task_scheduled_queue"
 CAPTCHA_FAILURE_MAX_RETRIES = int(os.getenv("CAPTCHA_FAILURE_MAX_RETRIES", "2"))
 CAPTCHA_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("CAPTCHA_FAILURE_RETRY_DELAY_SECONDS", "900"))
 NETWORK_FAILURE_MAX_RETRIES = int(os.getenv("NETWORK_FAILURE_MAX_RETRIES", "2"))
@@ -72,6 +91,50 @@ RESIDUAL_PROCESS_PATTERNS = (
     "playwright",
 )
 _sigchld_seen = False
+
+
+def task_redis_key(run_id: str, field: str) -> str:
+    return f"task:{run_id}:{field}"
+
+
+def set_task_feedback(
+    task_data: dict,
+    *,
+    status: str | None = None,
+    result: str | None = None,
+    hint: str | None = None,
+    state: str | None = None,
+    error_type: str | None = None,
+) -> None:
+    run_id = task_data["run_id"]
+    if status is not None:
+        r.set(task_redis_key(run_id, "status"), status, ex=TASK_LOCK_SECONDS)
+    if result is not None:
+        r.set(task_redis_key(run_id, "result"), result, ex=TASK_LOCK_SECONDS)
+    if hint is not None:
+        r.set(task_redis_key(run_id, "hint"), hint, ex=TASK_LOCK_SECONDS)
+    update_task(
+        DB_PATH,
+        run_id,
+        state=state,
+        error_type=error_type,
+        status_message=status,
+        hint=hint,
+        retry_data=task_data.get("retry_data"),
+    )
+
+
+def redact_log_line(line: str, email: str, password: str) -> str:
+    safe = line.replace(email, f"acct-{account_ref(email)}")
+    if password:
+        safe = safe.replace(password, "<redacted>")
+    safe = re.sub(
+        r"(?i)(authorization|api[_-]?key|cookie|token)(\s*[:=]\s*)([^\s,;]+)",
+        r"\1\2<redacted>",
+        safe,
+    )
+    safe = re.sub(r"\b[A-Za-z0-9_-]{80,}\b", "<token>", safe)
+    return safe
 
 
 def _mark_sigchld(signum, frame):
@@ -132,12 +195,36 @@ def log_worker_boot_info() -> None:
     log_worker_runtime_health("startup")
 
 
+def worker_heartbeat_loop() -> None:
+    while True:
+        with suppress(Exception):
+            r.set("worker:heartbeat", str(time.time()), ex=90)
+        time.sleep(30)
+
+
 def get_warp_index_for_email(email: str | None) -> int:
     if WARP_PROXY_COUNT <= 1:
         return 0
     seed = (email or "").strip().lower().encode("utf-8")
     digest = hashlib.sha256(seed).digest()
     return int.from_bytes(digest[:4], "big") % WARP_PROXY_COUNT
+
+
+def get_task_warp_index(task_data: dict) -> int:
+    default_index = get_warp_index_for_email(task_data.get("email"))
+    try:
+        override = int(task_data.get("retry_data", {}).get("warp_index"))
+    except (TypeError, ValueError):
+        return default_index
+    if WARP_PROXY_COUNT <= 0:
+        return 0
+    return override % WARP_PROXY_COUNT
+
+
+def next_retry_warp_index(error_type: str, current_index: int) -> int:
+    if error_type not in {"network_timeout", "driver_crash"} or WARP_PROXY_COUNT <= 1:
+        return current_index
+    return (current_index + 1) % WARP_PROXY_COUNT
 
 
 def get_warp_proxy_port(idx: int) -> int:
@@ -328,6 +415,12 @@ def ensure_warp_ready(warp_index: int = 0) -> bool:
     """Check WARP readiness and run at most one recovery flow per check cycle."""
     if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
         print("ℹ️ WARP proxy is not configured; skip readiness check")
+        with suppress(Exception):
+            r.setex(
+                f"metrics:warp:{warp_index}",
+                300,
+                json.dumps({"status": "not_configured", "updated_at": int(time.time())}),
+            )
         return True
 
     print(f"🔍 Checking WARP proxy: {WARP_PROXY_HOST}:{get_warp_proxy_port(warp_index)} [index={warp_index}]")
@@ -338,6 +431,12 @@ def ensure_warp_ready(warp_index: int = 0) -> bool:
 
         if success:
             print(f"✅ WARP ready - exit IP: {info}")
+            with suppress(Exception):
+                r.setex(
+                    f"metrics:warp:{warp_index}",
+                    300,
+                    json.dumps({"status": "healthy", "updated_at": int(time.time())}),
+                )
             return True
 
         print(f"⚠️ WARP check failed [{attempt}/{WARP_MAX_RETRIES}]: {info}")
@@ -355,13 +454,20 @@ def ensure_warp_ready(warp_index: int = 0) -> bool:
                 time.sleep(WARP_CONTROL_RESTART_BACKOFF_SECONDS)
 
     print("❌ WARP readiness check failed after bounded recovery")
+    with suppress(Exception):
+        r.setex(
+            f"metrics:warp:{warp_index}",
+            300,
+            json.dumps({"status": "unhealthy", "updated_at": int(time.time())}),
+        )
     return False
 
 
 def restart_warp_for_retry(email: str, reason: str, warp_index: int = 0) -> bool:
     """可恢复失败后按冷却时间重启 WARP，避免连续抖动代理。"""
+    ref = account_ref(email)
     if not os.getenv("HTTP_PROXY") and not os.getenv("HTTPS_PROXY"):
-        print(f"ℹ️ [{email}] 未配置 WARP 代理，跳过{reason}换 IP")
+        print(f"Account {ref}: no WARP proxy; skip recovery for {reason}")
         return False
 
     now = time.time()
@@ -372,54 +478,69 @@ def restart_warp_for_retry(email: str, reason: str, warp_index: int = 0) -> bool
             elapsed = now - float(last_restart)
             if elapsed < WARP_RESTART_COOLDOWN_SECONDS:
                 wait_left = int(WARP_RESTART_COOLDOWN_SECONDS - elapsed)
-                print(f"⏳ [{email}] WARP 刚重启过，冷却剩余 {wait_left}s，跳过本次重启")
+                print(f"Account {ref}: WARP cooldown remaining={wait_left}s")
                 return False
         except ValueError:
             pass
 
-    print(f"🔄 [{email}] {reason}，重启 WARP 换 IP")
+    print(f"Account {ref}: restart WARP reason={reason}")
     ok = restart_warp_container(warp_index)
     if ok:
         r.set(restart_key, str(time.time()), ex=max(WARP_RESTART_COOLDOWN_SECONDS * 2, 3600))
     else:
-        print(f"⚠️ [{email}] WARP recovery failed; keep retry flow without another immediate restart")
+        print(f"Account {ref}: WARP recovery failed")
     return ok
 
-def reset_profile_for_retry(email: str) -> int:
+def reset_profile_for_retry(profile_id: str, ref: str) -> int:
     """删除该账号的本地浏览器 profile，清理失效 Cookie/CSRF 状态。"""
     removed = 0
     for base_dir in PATHS_TO_CHECK:
-        profile_path = os.path.join(base_dir, email)
+        profile_path = safe_profile_path(base_dir, profile_id)
         if not os.path.exists(profile_path):
+            continue
+        if profile_path.is_symlink():
+            print(f"Account {ref}: profile cleanup refused symlink")
             continue
         try:
             shutil.rmtree(profile_path)
             removed += 1
-            print(f"🧹 [{email}] 已清理失效浏览器 profile: {profile_path}")
+            print(f"Account {ref}: invalid profile removed")
         except Exception as exc:
-            print(f"⚠️ [{email}] 清理浏览器 profile 失败: {profile_path} - {exc}")
+            print(f"Account {ref}: profile cleanup failed error={type(exc).__name__}")
     return removed
 
 
 def schedule_cookie_invalid_retry(task_data: dict) -> bool:
     email = task_data.get("email", "")
-    retry_count = int(task_data.get("cookie_invalid_retry_count", 0))
+    ref = account_ref(email)
+    retry_data = task_data.setdefault("retry_data", {})
+    retry_count = int(retry_data.get("cookie_invalid", 0))
     if retry_count >= COOKIE_INVALID_MAX_RETRIES:
-        print(f"🛑 [{email}] Cookie/CSRF 重试已达上限: {retry_count}/{COOKIE_INVALID_MAX_RETRIES}")
-        r.set(f"status:{email}", "❌ 登录状态失效，重试后仍失败", ex=3600)
-        r.set(f"result:{email}", "error_cookie_invalid", ex=3600)
-        r.set(f"hint:{email}", "本地登录态已清理但 Epic 仍拒绝登录，请稍后重新提交或联系管理员", ex=3600)
+        set_task_feedback(
+            task_data,
+            status="❌ 登录状态失效，重试后仍失败",
+            result="error_cookie_invalid",
+            hint="本地登录态已清理但 Epic 仍拒绝登录，请稍后重新提交或联系管理员",
+            state="failed",
+            error_type="session_invalid",
+        )
+        print(f"Account {ref}: cookie retry limit reached")
         return False
 
-    reset_profile_for_retry(email)
-    next_task = dict(task_data)
-    next_task["cookie_invalid_retry_count"] = retry_count + 1
-    r.rpush("task_queue", json.dumps(next_task, ensure_ascii=False))
-    r.setex(f"task_lock:{email}", TASK_TIMEOUT_SECONDS + 300, "queued_cookie_reset")
-    r.set(f"status:{email}", "🧹 登录状态失效，已清理本地 Cookie 并立即重试", ex=3600)
-    r.set(f"result:{email}", "retry_scheduled", ex=3600)
-    r.set(f"hint:{email}", "系统已清理该账号本地浏览器 profile，正在重新登录", ex=3600)
-    print(f"🔁 [{email}] Cookie/CSRF 失效，已清理 profile 并重新入队 [{retry_count + 1}/{COOKIE_INVALID_MAX_RETRIES}]")
+    reset_profile_for_retry(task_data["profile_id"], ref)
+    retry_data["cookie_invalid"] = retry_count + 1
+    payload = json.dumps({"run_id": task_data["run_id"]}, ensure_ascii=True)
+    r.rpush("task_queue", payload)
+    r.setex(f"retry_pending:{task_data['run_id']}", TASK_TIMEOUT_SECONDS + 300, "cookie_invalid")
+    set_task_feedback(
+        task_data,
+        status="🧹 登录状态失效，已清理本地 Cookie 并立即重试",
+        result="retry_scheduled",
+        hint="系统已清理该账号本地浏览器 profile，正在重新登录",
+        state="queued",
+        error_type="session_invalid",
+    )
+    print(f"Account {ref}: cookie retry queued attempt={retry_count + 1}")
     return True
 
 
@@ -427,59 +548,52 @@ def schedule_failure_retry(task_data: dict, error_type: str, warp_index: int | N
     """把可恢复失败放入 Redis 延迟队列，并限制重试次数和节奏。"""
     email = task_data.get("email", "")
     policies = {
-        "captcha_failed": (
-            CAPTCHA_FAILURE_MAX_RETRIES,
-            CAPTCHA_FAILURE_RETRY_DELAY_SECONDS,
-            "验证码失败",
-        ),
-        "network_timeout": (
-            NETWORK_FAILURE_MAX_RETRIES,
-            NETWORK_FAILURE_RETRY_DELAY_SECONDS,
-            "网络连接超时",
-        ),
-        "driver_crash": (
-            NETWORK_FAILURE_MAX_RETRIES,
-            NETWORK_FAILURE_RETRY_DELAY_SECONDS,
-            "浏览器驱动断连",
-        ),
+        "captcha_failed": (1, 7200, "验证码失败"),
+        "captcha_unsolved": (1, 7200, "验证码未能识别"),
+        "provider_timeout": (2, (900, 3600), "验证码服务暂时不可用"),
+        "network_timeout": (2, (600, 1800), "网络连接超时"),
+        "driver_crash": (2, (600, 1800), "浏览器驱动断连"),
+        "task_deadline": (1, 900, "任务软期限已到"),
     }
     if error_type not in policies:
         return False
 
-    max_retries, retry_delay, label = policies[error_type]
-    retry_key = f"{error_type}_retry_count"
-    retry_count = int(task_data.get(retry_key, 0))
+    max_retries, delays, label = policies[error_type]
+    retry_data = task_data.setdefault("retry_data", {})
+    retry_count = int(retry_data.get(error_type, 0))
 
     if retry_count >= max_retries:
-        print(f"🛑 [{email}] {label}重试已达上限: {retry_count}/{max_retries}")
-        r.set(f"status:{email}", f"❌ {label}，已达重试上限", ex=3600)
-        r.set(f"result:{email}", "fail", ex=3600)
-        r.set(f"hint:{email}", f"{label}多次发生，请稍后手动重试", ex=3600)
+        set_task_feedback(
+            task_data,
+            status=f"❌ {label}，已达重试上限",
+            result="fail",
+            hint=f"{label}多次发生，请稍后手动重试",
+            state="manual_required" if "captcha" in error_type else "failed",
+            error_type=error_type,
+        )
         return False
 
     if warp_index is None:
         warp_index = get_warp_index_for_email(email)
-    restart_warp_for_retry(email, label, warp_index)
+    if error_type in {"network_timeout", "driver_crash"}:
+        restart_warp_for_retry(email, label, warp_index)
 
-    next_task = dict(task_data)
-    next_task[retry_key] = retry_count + 1
+    retry_data[error_type] = retry_count + 1
+    retry_data["warp_index"] = next_retry_warp_index(error_type, warp_index)
+    retry_delay = delays[min(retry_count, len(delays) - 1)] if isinstance(delays, tuple) else delays
     run_at = int(time.time() + retry_delay)
-    payload = json.dumps(next_task, ensure_ascii=False)
+    payload = json.dumps({"run_id": task_data["run_id"]}, ensure_ascii=True)
     r.zadd(RETRY_QUEUE, {payload: run_at})
-    r.setex(f"retry_pending:{email}", retry_delay + TASK_TIMEOUT_SECONDS + 300, error_type)
-    r.setex(f"task_lock:{email}", retry_delay + TASK_TIMEOUT_SECONDS + 300, "retry_scheduled")
-    r.set(
-        f"status:{email}",
-        f"⏳ {label}，已换 IP，{max(1, retry_delay // 60)} 分钟后重试 "
-        f"[{retry_count + 1}/{max_retries}]",
-        ex=3600,
+    r.setex(f"retry_pending:{task_data['run_id']}", retry_delay + TASK_TIMEOUT_SECONDS + 300, error_type)
+    set_task_feedback(
+        task_data,
+        status=f"⏳ {label}，{max(1, retry_delay // 60)} 分钟后重试 [{retry_count + 1}/{max_retries}]",
+        result="retry_scheduled",
+        hint="系统已安排延迟重试",
+        state="deferred",
+        error_type=error_type,
     )
-    r.set(f"result:{email}", "retry_scheduled", ex=3600)
-    r.set(f"hint:{email}", "系统已自动更换 WARP 出口并安排延迟重试", ex=3600)
-    print(
-        f"⏳ [{email}] 已安排{label}延迟重试: {retry_delay}s 后执行 "
-        f"[{retry_count + 1}/{max_retries}]"
-    )
+    print(f"Account {account_ref(email)}: retry scheduled type={error_type} delay={retry_delay}s")
     return True
 
 
@@ -494,11 +608,52 @@ def move_due_retry_tasks(limit: int = 10) -> int:
             moved += 1
             try:
                 task_data = json.loads(payload)
-                r.delete(f"retry_pending:{task_data.get('email')}")
-                r.setex(f"task_lock:{task_data.get('email')}", TASK_LOCK_SECONDS, "queued_retry")
-                print(f"🚦 [延迟重试] 任务已重新入队: {task_data.get('email')}")
+                run_id = task_data["run_id"]
+                r.delete(f"retry_pending:{run_id}")
+                update_task(DB_PATH, run_id, state="queued")
+                print(f"Delayed retry queued: run_id={run_id}")
             except Exception:
                 print("🚦 [延迟重试] 任务已重新入队")
+    return moved
+
+
+def move_due_scheduled_tasks(limit: int = 10) -> int:
+    now = int(time.time())
+    due_tasks = r.zrangebyscore(SCHEDULED_TASK_QUEUE, 0, now, start=0, num=limit)
+    moved = 0
+    for payload in due_tasks:
+        if not r.zrem(SCHEDULED_TASK_QUEUE, payload):
+            continue
+        run_id = ""
+        lock_key = ""
+        try:
+            run_id = str(json.loads(payload)["run_id"])
+            email, _cycle_id = cycle_run_dispatch_status(DB_PATH, run_id)
+            lock_key = f"task_lock:{account_ref(email)}"
+            if not r.set(lock_key, "queued", nx=True, ex=TASK_LOCK_SECONDS):
+                r.zadd(SCHEDULED_TASK_QUEUE, {payload: now + 60})
+                continue
+            update_task(DB_PATH, run_id, state="queued")
+            r.rpush("task_queue", json.dumps({"run_id": run_id}, ensure_ascii=True))
+            moved += 1
+        except RuntimeError:
+            if run_id:
+                with suppress(Exception):
+                    update_task(
+                        DB_PATH,
+                        run_id,
+                        state="failed",
+                        error_type="cycle_obsolete",
+                        status_message="周免周期已变化，旧任务已取消",
+                    )
+        except Exception as exc:
+            if lock_key:
+                r.delete(lock_key)
+            if run_id:
+                with suppress(Exception):
+                    update_task(DB_PATH, run_id, state="scheduled")
+            r.zadd(SCHEDULED_TASK_QUEUE, {payload: now + 60})
+            print(f"Scheduled task dispatch deferred: type={type(exc).__name__}")
     return moved
 
 
@@ -542,7 +697,7 @@ def scrape_and_download_image(game_title):
     except: pass
     return None
 
-def report_success(email, game_title):
+def report_success(email, game_title, run_id=None):
     """
     向 Web 后端上报游戏领取成功记录
 
@@ -561,7 +716,8 @@ def report_success(email, game_title):
             resp = requests.post(WEB_API_URL, json={
                 "email": email,
                 "game_title": game_title,
-                "image_filename": filename or "default.png"
+                "image_filename": filename or "default.png",
+                "run_id": run_id,
             }, headers=headers, timeout=5, proxies=no_proxy)
             resp.raise_for_status()
 
@@ -569,10 +725,10 @@ def report_success(email, game_title):
             status = result.get("status", "unknown")
 
             if status == "recorded":
-                print(f"✅ 入库成功: {email} → {game_title}")
+                print(f"Game recorded: account={account_ref(email)} title={game_title}")
                 return True
             elif status == "skipped":
-                print(f"ℹ️ 已存在记录: {email} → {game_title}")
+                print(f"Game already recorded: account={account_ref(email)} title={game_title}")
                 return True
             else:
                 print(f"⚠️ 入库返回异常: {status} (尝试 {attempt+1}/3)")
@@ -584,14 +740,16 @@ def report_success(email, game_title):
         if attempt < 2:
             time.sleep(1)
 
-    print(f"❌ 入库失败（已放弃）: {email} → {game_title}")
+    print(f"Game report abandoned: account={account_ref(email)} title={game_title}")
     return False
 
-def clean_user_profile(email):
+def clean_user_profile(profile_id):
     """普通瘦身优化"""
     for base_dir in PATHS_TO_CHECK:
-        profile_path = os.path.join(base_dir, email)
+        profile_path = safe_profile_path(base_dir, profile_id)
         if not os.path.exists(profile_path): continue
+        if profile_path.is_symlink():
+            continue
         
         folders_to_nuke = ["cache2", "startupCache", "thumbnails", "datareporting", "shader-cache", "crashes", "minidumps", "saved-telemetry-pings", "storage/default"]
         files_to_nuke = ["favicon*", "places.sqlite*", "formhistory.sqlite*", "webappsstore.sqlite*", "content-prefs.sqlite*", "*.log", "SiteSecurityServiceState.txt"]
@@ -604,25 +762,25 @@ def clean_user_profile(email):
                 try: os.remove(f)
                 except: pass
 
-def nuke_account_immediately(email):
+def nuke_account_immediately(email: str, profile_id: str) -> None:
     """
-    ☢️ 核弹模式：等待进程死亡后，执行双重删除
+    等待浏览器退出后，请求 Web 删除账号，并安全清理当前 UUID profile。
 
-    ⚠️ 重要：内部 API 调用必须禁用代理，否则会被 WARP 拦截导致 503 错误
+    内部 API 调用必须禁用代理，否则会被 WARP 拦截导致 503 错误。
     """
-    print(f"💀 [致命错误] 正在执行销毁程序: {email}")
+    ref = account_ref(email)
+    print(f"Invalid account cleanup requested: account={ref}")
 
-    # ⚠️ 关键步骤：先睡 5 秒，让浏览器进程死透，防止它诈尸写回文件
-    print("⏳ 等待浏览器进程完全退出 (5s)...")
+    # 浏览器进程可能仍持有 profile 文件，先给进程退出留出时间。
+    print("Waiting for browser process exit (5s)")
     time.sleep(5)
 
     # 显式禁用代理，确保内部服务请求不被 WARP 拦截
     no_proxy = {"http": None, "https": None}
     headers = {"Authorization": f"Bearer {INTERNAL_API_TOKEN}"}
 
-    # 1. 呼叫后端删除 (后端权限通常更高)
+    # 已存在账号由 Web 根据数据库保存的 profile_id 删除；响应正文可能含敏感信息，不记录。
     try:
-        print(f"📞 呼叫后端 API: {NUKE_API_URL}")
         res = requests.post(
             NUKE_API_URL,
             json={"email": email},
@@ -630,22 +788,23 @@ def nuke_account_immediately(email):
             timeout=5,
             proxies=no_proxy,
         )
-        print(f"📞 后端响应: {res.status_code} - {res.text}")
-    except Exception as e:
-        print(f"❌ 后端 API 连接失败: {e}")
-    
-    # 2. Worker 再次执行本地物理删除 (补刀)
-    print("🗑️ 执行本地物理补刀...")
+        print(f"Account {ref}: backend cleanup status={res.status_code}")
+    except requests.RequestException as exc:
+        print(f"Account {ref}: backend cleanup failed error={type(exc).__name__}")
+
+    # 新账号尚未写入 accounts 时 Web 会拒绝删除，只清理本次任务绑定的 UUID profile。
     for base_dir in PATHS_TO_CHECK:
-        target_dir = os.path.join(base_dir, email)
-        if os.path.exists(target_dir):
-            try: 
-                shutil.rmtree(target_dir)
-                print(f"✅ [补刀成功] 已粉碎文件夹: {target_dir}")
-            except Exception as e:
-                print(f"❌ 删除失败 {target_dir}: {e}")
-        else:
-            print(f"ℹ️ 路径不存在(无需补刀): {target_dir}")
+        target_dir = safe_profile_path(base_dir, profile_id)
+        if not target_dir.exists():
+            continue
+        if target_dir.is_symlink():
+            print(f"Account {ref}: local cleanup refused symlink")
+            continue
+        try:
+            shutil.rmtree(target_dir)
+            print(f"Account {ref}: local profile removed")
+        except OSError as exc:
+            print(f"Account {ref}: local cleanup failed error={type(exc).__name__}")
 
 def is_verbose_traceback(line):
     """
@@ -752,6 +911,16 @@ ERROR_TYPE_MESSAGES = {
         "hint": "系统已停止本次高风险验证码会话，请稍后重试或联系管理员人工处理",
         "nuke": False,
     },
+    "provider_timeout": {
+        "status": "⚠️ 验证码服务暂时不可用",
+        "hint": "系统将切换供应商并延迟重试，无需重复提交",
+        "nuke": False,
+    },
+    "captcha_unsolved": {
+        "status": "⚠️ 验证码未能自动完成",
+        "hint": "系统仅会低频补跑一次，仍失败时需要人工处理",
+        "nuke": False,
+    },
     # 验证码需要人工处理
     "captcha_manual_required": {
         "status": "⚠️ 需要人工完成验证码",
@@ -836,7 +1005,7 @@ def parse_game_result_line(line: str) -> tuple[str, str] | None:
     game_result = json.loads(payload)
     title = str(game_result["title"]).strip()
     status = str(game_result["status"]).strip()
-    if not title or status not in {"claimed", "owned", "failed"}:
+    if not title or status not in {"claimed", "owned", "failed", "deferred", "unconfirmed"}:
         raise ValueError("invalid game result payload")
     return title, status
 
@@ -846,7 +1015,11 @@ def summarize_game_results(game_results: dict[str, str]) -> tuple[list[str], lis
         title for title, status in game_results.items() if status in {"claimed", "owned"}
     ]
     claimed = [title for title, status in game_results.items() if status == "claimed"]
-    failed = [title for title, status in game_results.items() if status == "failed"]
+    failed = [
+        title
+        for title, status in game_results.items()
+        if status in {"failed", "deferred", "unconfirmed"}
+    ]
     return successful, claimed, failed
 
 
@@ -1057,14 +1230,18 @@ def cleanup_residual_browser_processes(grace_seconds: int = 3) -> int:
 
 
 def run_task(task_data):
+    run_id = task_data["run_id"]
     email = task_data.get("email")
     password = task_data.get("password")
+    profile_id = task_data["profile_id"]
     mode = task_data.get("mode")
+    ref = account_ref(email)
+    started_at = time.monotonic()
 
-    warp_index = get_warp_index_for_email(email)
+    warp_index = get_task_warp_index(task_data)
     warp_port = get_warp_proxy_port(warp_index)
-    print(f"🚀 接到任务: {mode} - {email} | WARP index={warp_index} port={warp_port}")
-    r.set(f"status:{email}", "🚀 初始化环境...", ex=3600)
+    print(f"Task started: run_id={run_id} mode={mode} account={ref} warp={warp_index}:{warp_port}")
+    set_task_feedback(task_data, status="🚀 初始化环境...", state="running")
 
     # ============================================================
     # 🌐 WARP 代理检测
@@ -1072,15 +1249,31 @@ def run_task(task_data):
     # 如果不通则重启 WARP 容器换 IP，最多尝试 5 次
     # ============================================================
     if not ensure_warp_ready(warp_index):
-        r.set(f"status:{email}", "❌ 网络代理不可用", ex=3600)
-        r.set(f"result:{email}", "warp_unavailable", ex=3600)
-        r.set(f"hint:{email}", "WARP 代理无法连接 Epic Games，请联系管理员", ex=3600)
-        print(f"❌ [{email}] WARP 代理不可用，任务终止")
+        set_task_feedback(
+            task_data,
+            status="❌ 网络代理不可用",
+            result="warp_unavailable",
+            hint="WARP 代理无法连接 Epic Games，请联系管理员",
+            state="failed",
+            error_type="warp_unavailable",
+        )
+        print(f"Task failed: run_id={run_id} error=warp_unavailable")
         return
 
     env = os.environ.copy()
     env["EPIC_EMAIL"] = email
     env["EPIC_PASSWORD"] = password
+    env["EPIC_PROFILE_ID"] = profile_id
+    target_games = task_data.get("retry_data", {}).get("target_games")
+    if isinstance(target_games, list) and target_games:
+        env["EPIC_TARGET_GAMES_JSON"] = json.dumps(target_games, ensure_ascii=False)
+    env["TASK_SOFT_DEADLINE_EPOCH"] = str(time.time() + TASK_SOFT_TIMEOUT_SECONDS)
+    disk = shutil.disk_usage(DATA_DIR)
+    disk_percent = disk.used * 100 / disk.total if disk.total else 0
+    if disk_percent >= 80:
+        print(f"Disk usage warning: percent={disk_percent:.1f}")
+    if disk_percent >= 85:
+        env["EPIC_DISABLE_DEBUG_ARTIFACTS"] = "1"
     env["ENABLE_APSCHEDULER"] = "false"
     env["HTTP_PROXY"] = get_warp_proxy_url(warp_index)
     env["HTTPS_PROXY"] = get_warp_proxy_url(warp_index)
@@ -1121,7 +1314,7 @@ def run_task(task_data):
             if translated:
                 line = translated
 
-            print(f"[{email}] {line}")
+            print(f"[acct-{ref}] {redact_log_line(line, email, password)}")
 
             # ============================================================
             # 🔥 新增：解析错误类型（格式: ❌ ERROR_TYPE:xxx）
@@ -1136,18 +1329,18 @@ def run_task(task_data):
                     # 根据错误类型设置状态
                     if error_type in ERROR_TYPE_MESSAGES:
                         error_info = ERROR_TYPE_MESSAGES[error_type]
-                        r.set(f"status:{email}", error_info["status"], ex=3600)
-
-                        # 设置错误提示，供前端弹窗使用
-                        if error_info.get("hint"):
-                            r.set(f"hint:{email}", error_info["hint"], ex=3600)
+                        set_task_feedback(
+                            task_data,
+                            status=error_info["status"],
+                            result=f"error_{error_type}",
+                            hint=error_info.get("hint"),
+                            error_type=error_type,
+                        )
 
                         # 如果需要删除账号
                         if error_info.get("nuke"):
                             is_fatal_failure = True
 
-                        # 对于 EULA 失败等非致命错误，设置特殊结果
-                        r.set(f"result:{email}", f"error_{error_type}", ex=3600)
                     continue
 
             # 解析最终错误类型（格式: ❌ FINAL_ERROR:xxx）
@@ -1173,24 +1366,25 @@ def run_task(task_data):
                     # 根据错误类型设置状态
                     if game_error in ERROR_TYPE_MESSAGES:
                         error_info = ERROR_TYPE_MESSAGES[game_error]
-                        r.set(f"status:{email}", error_info["status"], ex=3600)
-
-                        # 设置错误提示，供前端弹窗使用
-                        if error_info.get("hint"):
-                            r.set(f"hint:{email}", error_info["hint"], ex=3600)
+                        set_task_feedback(
+                            task_data,
+                            status=error_info["status"],
+                            result=f"game_error_{game_error}",
+                            hint=error_info.get("hint"),
+                            error_type=game_error,
+                        )
 
                         # 如果需要删除账号
                         if error_info.get("nuke"):
                             is_fatal_failure = True
 
-                        # 设置结果
-                        r.set(f"result:{email}", f"game_error_{game_error}", ex=3600)
                     continue
 
             if "GAME_RESULT:" in line:
                 try:
                     title, status = parse_game_result_line(line)
                     game_results[title] = status
+                    record_game_result(DB_PATH, run_id, title, status)
                     print(f"🎮 游戏结果: {title} -> {status}")
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                     print(f"⚠️ 无法解析游戏结果: {exc}")
@@ -1198,45 +1392,55 @@ def run_task(task_data):
 
             # 🛑 致命错误 A: 无法获取 Cookie
             if "context cookies is not available" in line:
-                r.set(f"status:{email}", "❌ 登录失败：无效账号", ex=300)
-                r.set(f"result:{email}", "fail", ex=3600)
+                set_task_feedback(
+                    task_data,
+                    status="❌ 登录失败：无效账号",
+                    result="fail",
+                    state="failed",
+                    error_type="invalid_account",
+                )
                 is_fatal_failure = True
                 terminate_process_group(process)
-                nuke_account_immediately(email)
+                nuke_account_immediately(email, profile_id)
                 return
 
             # 🛑 致命错误 B: 密码错误（兼容旧日志格式）
             if "invalid_account_credentials" in line or "账号或密码错误" in line:
-                r.set(f"status:{email}", "❌ 密码错误", ex=300)
-                r.set(f"result:{email}", "fail", ex=3600)
+                set_task_feedback(
+                    task_data,
+                    status="❌ 密码错误",
+                    result="fail",
+                    state="failed",
+                    error_type="invalid_credentials",
+                )
                 terminate_process_group(process)
-                nuke_account_immediately(email)
+                nuke_account_immediately(email, profile_id)
                 return
 
             if "Could not find Place Order button" in line:
-                r.set(f"status:{email}", "⚠️ 找不到下单按钮", ex=3600)
+                set_task_feedback(task_data, status="⚠️ 找不到下单按钮")
                 has_critical_error = True
 
             if "Timeout 30000ms exceeded" in line:
-                r.set(f"status:{email}", "⚠️ 操作超时，重试中...", ex=3600)
+                set_task_feedback(task_data, status="⚠️ 操作超时，重试中...")
                 has_critical_error = True
 
             if "Connection closed while reading from the driver" in line or "playwright/driver" in line:
                 final_error_type = "driver_crash"
-                r.set(f"status:{email}", "⚠️ 浏览器驱动断连，准备延迟重试", ex=3600)
+                set_task_feedback(task_data, status="⚠️ 浏览器驱动断连，准备延迟重试")
 
             # 验证码超时
             if "captcha response timeout" in line.lower() or "验证码响应超时" in line:
-                r.set(f"status:{email}", "⚠️ 验证码超时，重试中...", ex=3600)
+                set_task_feedback(task_data, status="⚠️ 验证码超时，重试中...")
 
             # 验证码成功
             if "Challenge success" in line or "验证码通过" in line:
-                r.set(f"status:{email}", "✅ 验证码通过", ex=3600)
+                set_task_feedback(task_data, status="✅ 验证码通过")
 
             if "Already in the library" in line or "游戏已在库中" in line:
                 is_already_owned = True
                 has_critical_error = False  # 游戏已在库中，清除错误标记
-                r.set(f"status:{email}", "ℹ️ 游戏已在库中", ex=3600)
+                set_task_feedback(task_data, status="ℹ️ 游戏已在库中")
 
             # 游戏领取成功，清除错误标记
             if "任务完成" in line or "领取成功" in line:
@@ -1249,7 +1453,7 @@ def run_task(task_data):
 
             # 登录成功识别（匹配多种日志格式）
             if "Authentication completed" in line or "already logged in" in line or "Epic Games 已登录" in line or "✅ 登录成功" in line:
-                r.set(f"status:{email}", "✅ 登录成功", ex=3600)
+                set_task_feedback(task_data, status="✅ 登录成功")
                 is_login_success = True
 
             if '"title":' in line:
@@ -1257,7 +1461,7 @@ def run_task(task_data):
                     match = re.search(r'"title":\s*"([^"]+)"', line)
                     if match:
                         game_name = match.group(1)
-                        r.set(f"status:{email}", f"🎁 发现: {game_name}", ex=3600)
+                        set_task_feedback(task_data, status=f"🎁 发现: {game_name}")
                         if game_name not in discovered_games:
                             discovered_games.append(game_name)
                         scrape_and_download_image(game_name)
@@ -1267,13 +1471,17 @@ def run_task(task_data):
         return_code = process.wait(timeout=10)
 
         # 正常结束，执行常规瘦身
-        clean_user_profile(email)
+        clean_user_profile(profile_id)
 
         if final_error_type == "cookie_invalid" and not is_fatal_failure:
             schedule_cookie_invalid_retry(task_data)
             return
 
         if final_error_type in {"network_timeout", "driver_crash"} and not is_fatal_failure:
+            schedule_failure_retry(task_data, final_error_type, warp_index)
+            return
+
+        if final_error_type in {"provider_timeout", "captcha_failed", "captcha_unsolved"} and not is_fatal_failure:
             schedule_failure_retry(task_data, final_error_type, warp_index)
             return
 
@@ -1285,112 +1493,233 @@ def run_task(task_data):
         if successful_games:
             report_failures = []
             for game_title in successful_games:
-                if not report_success(email, game_title):
+                if not report_success(email, game_title, run_id):
                     report_failures.append(game_title)
             if failed_games or report_failures or (
                 final_error_type and final_error_type not in {"success", "all_owned"}
             ):
                 failure_parts = failed_games + report_failures
                 failure_detail = ", ".join(failure_parts) or final_error_type
-                partial_retry_count = int(task_data.get("partial_game_retry_count", 0))
+                partial_retry_count = int(task_data.setdefault("retry_data", {}).get("partial", 0))
                 if failed_games and not report_failures and partial_retry_count < 1:
                     retry_task = dict(task_data)
-                    retry_task["partial_game_retry_count"] = partial_retry_count + 1
+                    retry_task["retry_data"] = dict(task_data["retry_data"])
+                    retry_task["retry_data"]["partial"] = partial_retry_count + 1
+                    retry_task["retry_data"]["target_games"] = failed_games
                     if schedule_failure_retry(retry_task, "captcha_failed"):
-                        r.set(f"status:{email}", "⚠️ 部分游戏领取失败，已安排自动补跑", ex=3600)
-                        r.set(
-                            f"hint:{email}",
-                            f"已成功记录本轮已领取游戏，失败游戏稍后自动补跑: {failure_detail}",
-                            ex=3600,
+                        set_task_feedback(
+                            retry_task,
+                            status="⚠️ 部分游戏领取失败，已安排自动补跑",
+                            result="retry_scheduled",
+                            hint=f"已成功记录本轮已领取游戏，失败游戏稍后自动补跑: {failure_detail}",
+                            state="deferred",
+                            error_type="captcha_failed",
                         )
                         return
-                r.set(f"status:{email}", "⚠️ 部分游戏领取失败", ex=3600)
-                r.set(f"result:{email}", "error_unknown_error", ex=3600)
-                r.set(
-                    f"hint:{email}",
-                    f"失败详情: {failure_detail}",
-                    ex=3600,
+                set_task_feedback(
+                    task_data,
+                    status="⚠️ 部分游戏领取失败",
+                    result="error_unknown_error",
+                    hint=f"失败详情: {failure_detail}",
+                    state="failed",
+                    error_type=final_error_type or "checkout_failed",
+                )
+            elif failed_games:
+                deferred_only = all(
+                    game_results.get(title) == "deferred" for title in failed_games
+                )
+                if deferred_only:
+                    retry_task = dict(task_data)
+                    retry_task["retry_data"] = dict(task_data.get("retry_data", {}))
+                    retry_task["retry_data"]["target_games"] = failed_games
+                    if schedule_failure_retry(retry_task, "task_deadline", warp_index):
+                        return
+                set_task_feedback(
+                    task_data,
+                    status="⚠️ 领取结果无法确认",
+                    result="unconfirmed",
+                    hint="未确认的游戏已保留明细，请稍后人工复核",
+                    state="manual_required",
+                    error_type="unconfirmed",
+                )
+            elif not mark_cycle_complete_if_ready(DB_PATH, run_id):
+                set_task_feedback(
+                    task_data,
+                    status="⚠️ 本周期游戏尚未全部确认",
+                    result="unconfirmed",
+                    hint="只有本周期全部周免均为已领取或已拥有才会标记完成",
+                    state="manual_required",
+                    error_type="cycle_incomplete",
                 )
             elif claimed_games:
-                r.set(f"status:{email}", f"🎉 已领取 {len(claimed_games)} 个游戏", ex=3600)
-                r.set(f"result:{email}", "success_new", ex=3600)
+                set_task_feedback(
+                    task_data,
+                    status=f"🎉 已领取 {len(claimed_games)} 个游戏",
+                    result="success_new",
+                    state="succeeded",
+                )
             else:
-                r.set(f"status:{email}", "✅ 任务完成（已在库中）", ex=3600)
-                r.set(f"result:{email}", "success_owned", ex=3600)
+                set_task_feedback(
+                    task_data,
+                    status="✅ 任务完成（已在库中）",
+                    result="success_owned",
+                    state="succeeded",
+                )
             return
 
         if final_error_type and final_error_type not in {"success", "all_owned"}:
             error_info = ERROR_TYPE_MESSAGES.get(final_error_type, ERROR_TYPE_MESSAGES["unknown"])
-            r.set(f"status:{email}", error_info["status"], ex=3600)
-            if error_info.get("hint"):
-                r.set(f"hint:{email}", error_info["hint"], ex=3600)
-            r.set(f"result:{email}", f"error_{final_error_type}", ex=3600)
+            set_task_feedback(
+                task_data,
+                status=error_info["status"],
+                result=f"error_{final_error_type}",
+                hint=error_info.get("hint"),
+                state="failed",
+                error_type=final_error_type,
+            )
             return
 
         # Backward-compatible fallback for older deploy output.
         if collection_completed and discovered_games and not has_critical_error:
             for game_title in discovered_games:
-                report_success(email, game_title)
-            r.set(f"status:{email}", "🎉 领取成功！", ex=3600)
-            r.set(f"result:{email}", "success_new", ex=3600)
+                report_success(email, game_title, run_id)
+            if not mark_cycle_complete_if_ready(DB_PATH, run_id):
+                set_task_feedback(
+                    task_data,
+                    status="⚠️ 本周期游戏尚未全部确认",
+                    result="unconfirmed",
+                    state="manual_required",
+                    error_type="cycle_incomplete",
+                )
+                return
+            set_task_feedback(task_data, status="🎉 领取成功！", result="success_new", state="succeeded")
             return
 
         if is_already_owned and not has_critical_error:
-            r.set(f"status:{email}", "✅ 任务完成（已在库中）", ex=3600)
-            r.set(f"result:{email}", "success_owned", ex=3600)
+            if not mark_cycle_complete_if_ready(DB_PATH, run_id):
+                set_task_feedback(
+                    task_data,
+                    status="⚠️ 本周期游戏尚未全部确认",
+                    result="unconfirmed",
+                    state="manual_required",
+                    error_type="cycle_incomplete",
+                )
+                return
+            set_task_feedback(
+                task_data,
+                status="✅ 任务完成（已在库中）",
+                result="success_owned",
+                state="succeeded",
+            )
             return
 
         if mode == 'verify':
             if is_login_success and not is_fatal_failure and not has_critical_error:
-                r.set(f"result:{email}", "success", ex=3600)
-                r.set(f"status:{email}", "✅ 验证通过", ex=3600)
+                set_task_feedback(
+                    task_data,
+                    status="✅ 验证通过",
+                    result="success",
+                    state="succeeded",
+                )
             else:
-                if not r.get(f"result:{email}"):
-                    r.set(f"result:{email}", "fail", ex=3600)
-                    if not r.get(f"status:{email}"):
-                        r.set(f"status:{email}", "❌ 验证失败", ex=3600)
-        elif not r.get(f"result:{email}"):
-            r.set(f"status:{email}", "❌ 未能确认领取结果", ex=3600)
-            r.set(f"result:{email}", "fail", ex=3600)
+                set_task_feedback(
+                    task_data,
+                    status="❌ 验证失败",
+                    result="fail",
+                    state="failed",
+                    error_type=final_error_type or "verification_failed",
+                )
+        else:
+            set_task_feedback(
+                task_data,
+                status="❌ 未能确认领取结果",
+                result="fail",
+                state="failed",
+                error_type=final_error_type or "unconfirmed",
+            )
 
     except subprocess.TimeoutExpired:
-        print(f"❌ [{email}] 任务超过硬超时 {TASK_TIMEOUT_SECONDS}s，已终止子进程")
-        r.set(f"status:{email}", "❌ 任务执行超时", ex=3600)
-        r.set(f"hint:{email}", "浏览器任务长时间无响应，请稍后重试", ex=3600)
-        r.set(f"result:{email}", "fail", ex=3600)
+        print(f"Task hard timeout: run_id={run_id} limit={TASK_TIMEOUT_SECONDS}s")
+        schedule_failure_retry(task_data, "task_deadline", warp_index)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Task error: run_id={run_id} type={type(e).__name__}")
         traceback.print_exc()
-        r.set(f"status:{email}", "❌ 系统错误", ex=3600)
-        r.set(f"result:{email}", "fail", ex=3600)
+        set_task_feedback(
+            task_data,
+            status="❌ 系统错误",
+            result="fail",
+            state="failed",
+            error_type="system_error",
+        )
     finally:
         if process and process.poll() is None:
             terminate_process_group(process)
         cleanup_residual_browser_processes()
         reap_child_processes()
-        log_worker_runtime_health(f"after_task:{email}")
+        log_worker_runtime_health(f"after_task:{ref}")
 
 def main_loop():
     log_worker_boot_info()
+    cipher = CredentialCipher.from_environment()
+    threading.Thread(target=worker_heartbeat_loop, name="worker-heartbeat", daemon=True).start()
     while True:
         if _sigchld_seen:
             reap_child_processes()
+        move_due_scheduled_tasks()
         move_due_retry_tasks()
         task = r.blpop("task_queue", timeout=10)
         if task:
             _, data_json = task
-            email = None
+            task_data = None
+            run_id = None
             try:
-                task_data = json.loads(data_json)
-                email = task_data.get("email")
-                if email:
-                    r.setex(f"task_lock:{email}", TASK_LOCK_SECONDS, "running")
+                payload = json.loads(data_json)
+                run_id = payload["run_id"]
+                context = load_task_context(DB_PATH, cipher, run_id)
+                task_data = {
+                    "run_id": context.run_id,
+                    "email": context.email,
+                    "password": context.password,
+                    "profile_id": context.profile_id,
+                    "mode": context.mode,
+                    "attempt": context.attempt,
+                    "retry_data": context.retry_data,
+                }
+                if not task_cycle_is_active(DB_PATH, context.retry_data):
+                    update_task(
+                        DB_PATH,
+                        run_id,
+                        state="failed",
+                        error_type="cycle_obsolete",
+                        status_message="周免周期已变化，旧任务已取消",
+                    )
+                    r.delete(f"task_lock:{context.account_ref}")
+                    task_data = None
+                    continue
+                r.setex(f"task_lock:{context.account_ref}", TASK_LOCK_SECONDS, "running")
                 run_task(task_data)
-            except Exception:
-                traceback.print_exc()
+            except Exception as exc:
+                print(f"Task context load failed: type={type(exc).__name__}")
+                if run_id:
+                    with suppress(Exception):
+                        update_task(
+                            DB_PATH,
+                            run_id,
+                            state="failed",
+                            error_type="task_context_unavailable",
+                            status_message="任务上下文不可用",
+                        )
+                    with suppress(Exception), connect(DB_PATH) as conn:
+                        row = conn.execute(
+                            "SELECT email FROM task_runs WHERE run_id=?", (run_id,)
+                        ).fetchone()
+                        if row:
+                            r.delete(f"task_lock:{account_ref(row['email'])}")
             finally:
-                if email and not r.exists(f"retry_pending:{email}"):
-                    r.delete(f"task_lock:{email}")
+                if task_data:
+                    run_id = task_data["run_id"]
+                    if not r.exists(f"retry_pending:{run_id}"):
+                        r.delete(f"task_lock:{account_ref(task_data['email'])}")
             if TASK_SPACING_SECONDS > 0:
                 time.sleep(TASK_SPACING_SECONDS)
             reap_child_processes()

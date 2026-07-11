@@ -8,6 +8,7 @@ dependencies = [
     "browserforge>=1.2.0",
     "celery[redis]>=5.4.0",
     "camoufox[geoip]==0.4.11",
+    "cryptography>=45.0.0",
     "fastapi>=0.115.0",
     "hcaptcha-challenger[camoufox]==0.19.0",
     "httpx>=0.28.0",
@@ -68,5 +69,6 @@ dev = [
     "black>=25.1.0",
     "celery-types>=0.23.0",
     "pytest>=8.3.5",
+    "fakeredis>=2.30.0",
     "ruff>=0.12.3",
 ]

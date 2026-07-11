@@ -8,11 +8,76 @@ from services.epic_games_service import (
     EpicGames,
     GameCollectResult,
     _fetch_order_items,
+    _fetch_promotions_data,
 )
 from hcaptcha_challenger.models import ChallengeSignal
 
 
 class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cookie_session_continues_when_navigation_marker_is_missing(self):
+        marker = SimpleNamespace(
+            get_attribute=AsyncMock(side_effect=RuntimeError("marker timeout"))
+        )
+        page = SimpleNamespace(
+            url="https://store.epicgames.com/en-US/free-games",
+            goto=AsyncMock(),
+            wait_for_timeout=AsyncMock(),
+            locator=Mock(return_value=marker),
+            context=SimpleNamespace(cookies=AsyncMock(return_value=[{"name": "session"}])),
+        )
+        agent = EpicAgent(page)
+
+        async def load_promotions():
+            agent._promotions = [SimpleNamespace(title="Game A")]
+
+        agent._check_orders = AsyncMock(side_effect=load_promotions)
+
+        should_ignore, result = await agent._should_ignore_task()
+
+        self.assertFalse(should_ignore)
+        self.assertEqual(result, GameCollectResult.SUCCESS)
+
+    async def test_promotion_fetch_retries_transient_count_drop(self):
+        partial = {"response": "partial"}
+        complete = {"response": "complete"}
+        responses = [
+            SimpleNamespace(json=Mock(return_value=partial), raise_for_status=Mock()),
+            SimpleNamespace(json=Mock(return_value=complete), raise_for_status=Mock()),
+        ]
+
+        with (
+            patch("services.epic_games_service.httpx.get", side_effect=responses) as get,
+            patch("services.epic_games_service._promotion_count", side_effect=[1, 2]),
+            patch("services.epic_games_service.time.sleep"),
+        ):
+            result = _fetch_promotions_data(expected_count=2)
+
+        self.assertIs(result, complete)
+        self.assertEqual(get.call_count, 2)
+
+    async def test_partial_retry_selects_only_failed_targets(self):
+        agent = EpicAgent(SimpleNamespace())
+        agent._orders = [SimpleNamespace(namespace="owned-ns")]
+        promotions = [
+            SimpleNamespace(title="Game A", namespace="owned-ns", url="https://example/a"),
+            SimpleNamespace(title="Game B", namespace="retry-ns", url="https://example/b"),
+            SimpleNamespace(title="Game C", namespace="other-ns", url="https://example/c"),
+        ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"EPIC_TARGET_GAMES_JSON": json.dumps(["Game A", "Game B", "Gone"])},
+            ),
+            patch("services.epic_games_service.get_promotions", return_value=promotions),
+            patch.object(EpicGames, "_emit_game_result") as emit,
+        ):
+            await agent._check_orders()
+
+        self.assertEqual([game.title for game in agent._promotions], ["Game B"])
+        emit.assert_any_call("Game A", "owned")
+        emit.assert_any_call("Gone", "unconfirmed")
+
     async def test_unconfirmed_captcha_checkout_raises_instead_of_succeeding(self):
         payment_button = SimpleNamespace(
             text_content=AsyncMock(return_value="Place Order"),
@@ -121,15 +186,15 @@ class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         }
-        history_page = SimpleNamespace(
-            goto=AsyncMock(return_value=SimpleNamespace(status=200)),
-            locator=lambda _selector: SimpleNamespace(
-                text_content=AsyncMock(return_value=json.dumps(payload))
-            ),
-            close=AsyncMock(),
+        response = SimpleNamespace(
+            status=200,
+            headers={"content-type": "application/json"},
+            url="https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory",
+            json=AsyncMock(return_value=payload),
         )
+        request = SimpleNamespace(get=AsyncMock(return_value=response))
         page = SimpleNamespace(
-            context=SimpleNamespace(new_page=AsyncMock(return_value=history_page)),
+            context=SimpleNamespace(request=request),
             goto=AsyncMock(),
         )
 
@@ -137,8 +202,20 @@ class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item.namespace for item in orders], [namespace])
         page.goto.assert_not_awaited()
-        history_page.goto.assert_awaited_once()
-        history_page.close.assert_awaited_once()
+        request.get.assert_awaited_once()
+
+    async def test_order_history_rejects_non_json_without_logging_body(self):
+        response = SimpleNamespace(
+            status=200,
+            headers={"content-type": "text/html"},
+            url="https://www.epicgames.com/id/login",
+        )
+        page = SimpleNamespace(
+            context=SimpleNamespace(request=SimpleNamespace(get=AsyncMock(return_value=response)))
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected_content_type"):
+            await _fetch_order_items(page)
 
     async def test_page_wide_owned_text_does_not_mark_product_owned(self):
         product_button = SimpleNamespace(

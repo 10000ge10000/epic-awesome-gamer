@@ -1,5 +1,7 @@
 #!/bin/bash
 # ============================================================
+
+set -Eeuo pipefail
 # Epic Kiosk - 自动驾驶领取系统（本地部署版）
 # ============================================================
 # GitHub: https://github.com/10000ge10000/epic-kiosk
@@ -8,7 +10,7 @@
 #
 # 使用方式：
 #   1. 克隆项目后，在项目目录执行: ./install.sh
-#   2. 或一键部署: curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
+#   2. 私有仓库请先完成授权克隆，再在项目目录运行脚本。
 #
 # ============================================================
 
@@ -229,7 +231,7 @@ configure_api_key() {
     if [ -f ".env" ]; then
         current_key=$(grep -E "^API_KEY=" .env | head -1 | sed 's/API_KEY=//')
         if [[ "$current_key" =~ ^sk- && "$current_key" != "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ]]; then
-            print_success "已检测到 API Key: ${current_key:0:10}...${current_key: -4}"
+            print_success "已检测到现有 API Key"
             read -p "是否使用现有 Key? [Y/n]: " use_existing < /dev/tty
             use_existing=${use_existing:-Y}
 
@@ -243,7 +245,8 @@ configure_api_key() {
     # 输入 API Key（从 /dev/tty 读取，支持 curl | bash 管道运行）
     while true; do
         echo ""
-        read -p "请输入你的 SiliconFlow API Key (sk-xxx): " api_key < /dev/tty
+        read -s -p "请输入你的 SiliconFlow API Key (sk-xxx): " api_key < /dev/tty
+        echo ""
 
         if [[ -z "$api_key" ]]; then
             print_error "API Key 不能为空"
@@ -254,8 +257,6 @@ configure_api_key() {
             print_warning "SiliconFlow API Key 通常以 sk- 开头，请确认"
         fi
 
-        echo ""
-        echo -e "你输入的: ${YELLOW}${api_key:0:10}...${api_key: -4}${NC}"
         read -p "确认无误? [Y/n]: " confirm_key < /dev/tty
         confirm_key=${confirm_key:-Y}
 
@@ -274,61 +275,50 @@ deploy_service() {
 
     cd "$PROJECT_DIR"
 
-    # 写入 .env，避免把真实 key 固化到 docker-compose.yml
-    print_info "配置 API Key..."
+    # 密钥写入仓库外的只读 secret 文件，.env 只保存路径和非敏感配置。
+    print_info "配置加密密钥和 API secret..."
     if [ -f ".env.example" ] && [ ! -f ".env" ]; then
         cp .env.example .env
     fi
 
     if [ -f ".env" ]; then
-        if grep -qE "^API_KEY=" .env; then
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                sed -i '' "s|^API_KEY=.*|API_KEY=$API_KEY|g" .env
-            else
-                sed -i "s|^API_KEY=.*|API_KEY=$API_KEY|g" .env
-            fi
-        else
-            printf "
-API_KEY=%s
-" "$API_KEY" >> .env
+        secret_dir="/etc/epic-kiosk/secrets"
+        install -d -m 0700 "$secret_dir"
+        printf '%s' "$API_KEY" > "$secret_dir/captcha_siliconflow_api_key"
+        sed -i '/^API_KEY=/d' .env
+        if [ ! -s "$secret_dir/captcha_nvidia_api_key" ]; then
+            read -s -p "请输入 NVIDIA API Key: " nvidia_key < /dev/tty
+            echo ""
+            [ -n "$nvidia_key" ] || { print_error "NVIDIA API Key 不能为空"; exit 1; }
+            printf '%s' "$nvidia_key" > "$secret_dir/captcha_nvidia_api_key"
         fi
-
-        if ! grep -qE "^API_BASE_URL=" .env; then
-            printf "API_BASE_URL=https://api.siliconflow.cn/v1
-" >> .env
+        [ -s "$secret_dir/internal_api_token" ] || openssl rand -hex 32 > "$secret_dir/internal_api_token"
+        if [ ! -s "$secret_dir/epic_credential_keys" ]; then
+            openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n' > "$secret_dir/epic_credential_keys"
         fi
-
-        if ! grep -qE "^INTERNAL_API_TOKEN=.{32,}$" .env ||
-           grep -qE "^INTERNAL_API_TOKEN=replace-" .env; then
-            if command -v openssl &> /dev/null; then
-                internal_token=$(openssl rand -hex 32)
-            else
-                internal_token=$(head -c 48 /dev/urandom | base64 | tr -d '\n')
-            fi
-            if grep -qE "^INTERNAL_API_TOKEN=" .env; then
-                if [[ "$OSTYPE" == "darwin"* ]]; then
-                    sed -i '' "s|^INTERNAL_API_TOKEN=.*|INTERNAL_API_TOKEN=$internal_token|g" .env
-                else
-                    sed -i "s|^INTERNAL_API_TOKEN=.*|INTERNAL_API_TOKEN=$internal_token|g" .env
-                fi
-            else
-                printf "INTERNAL_API_TOKEN=%s
-" "$internal_token" >> .env
-            fi
-        fi
-        print_success "API Key 已写入 .env"
+        chown 1002:1002 "$secret_dir"/*
+        chmod 0600 "$secret_dir"/* .env
+        print_success "Secret 已写入 /etc/epic-kiosk/secrets"
     else
         print_error ".env 不存在且无法创建"
         exit 1
     fi
 
+    # Web/worker 以固定 UID 1002 运行，宿主机持久化目录必须归该 UID 所有。
+    install -d -o 1002 -g 1002 -m 0700 \
+        data data/images data/logs data/runtime data/user_data
+    chown -R 1002:1002 data
+    find data -type d -exec chmod 0700 {} +
+    find data -type f -exec chmod 0600 {} +
+
     # 本地构建并启动（不拉取云端镜像）
     print_info "开始构建镜像（首次约需 5-10 分钟）..."
     print_info "正在构建 Web 服务..."
-    docker compose build web 2>&1 | tail -5
+    docker compose config --quiet
+    docker compose build web
 
     print_info "正在构建 Worker 服务..."
-    docker compose build worker 2>&1 | tail -5
+    docker compose build worker
 
     # 启动服务
     print_info "启动服务..."
@@ -360,11 +350,8 @@ show_complete() {
     echo -e "${CYAN}项目目录:${NC} $PROJECT_DIR"
     echo ""
     echo -e "${CYAN}访问地址:${NC}"
-    if [[ -n "$PUBLIC_IP" && "$PUBLIC_IP" != "127.0.0.1" ]]; then
-        echo -e "  公网: ${YELLOW}http://$PUBLIC_IP:18000${NC}"
-    else
-        echo -e "  公网: ${YELLOW}未检测到公网 IPv4，请检查服务器网络${NC}"
-    fi
+    echo -e "  本机反代上游: ${YELLOW}http://127.0.0.1:18000${NC}"
+    echo -e "  ${YELLOW}18000 端口仅监听回环地址，请通过 HTTPS 反向代理访问。${NC}"
     echo ""
     echo -e "${CYAN}常用命令:${NC}"
     echo "  查看状态: cd $PROJECT_DIR && docker compose ps"

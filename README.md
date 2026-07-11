@@ -18,9 +18,9 @@ Epic Kiosk 是一个基于 Docker 的 Epic Games 每周免费游戏自动领取�
 ## 特性
 
 - **多账号托管**：在 Web 控制台提交 Epic 邮箱和密码，后续由 Worker 自动处理登录与领取。
-- **验证码处理**：通过 OpenAI-compatible API 调用视觉模型处理 hCaptcha，并支持外部验证码服务商兜底。
-- **多游戏流程**：本周免费游戏有多个时，单个游戏失败不会中断整轮任务，失败项会延迟补跑。
-- **队列调度**：Redis 管理任务队列、任务锁、延迟重试和每日自动调度。
+- **验证码处理**：NVIDIA 主用、SiliconFlow 备用，支持会话降级、跨任务熔断和外部验证码服务商兜底。
+- **多游戏流程**：只有本周期全部周免均确认 `claimed/owned` 才会标记账号完成，失败项会延迟补跑。
+- **周期调度**：Redis 持久保存分批任务；周免集合未变化时跳过已完成账号，检测到新游戏后再调度全部账号。
 - **多 WARP 出口**：单个 `epic-warp` 容器提供 10 个内部 WARP 实例，Worker 按账号稳定分配代理出口。
 - **Docker 部署**：`web`、`worker`、`redis`、`warp` 四个服务通过 Docker Compose 本地构建和运行。
 
@@ -37,21 +37,23 @@ cp .env.example .env
 nano .env
 ```
 
-推荐生产配置使用 NVIDIA OpenAI-compatible API：
-
-```env
-API_PROVIDER=nvidia
-API_BASE_URL=https://integrate.api.nvidia.com/v1
-API_KEY=<your-nvidia-api-key>
-CAPTCHA_MODEL=meta/llama-4-maverick-17b-128e-instruct
-CAPTCHA_MODEL_FALLBACK=meta/llama-4-maverick-17b-128e-instruct
-INTERNAL_API_TOKEN=<run-openssl-rand-hex-32>
-```
-
-生成内部接口密钥：
+创建仓库外 Secret 目录和文件：
 
 ```bash
-openssl rand -hex 32
+sudo install -d -m 0700 -o 1002 -g 1002 /etc/epic-kiosk/secrets
+sudo install -m 0600 -o 1002 -g 1002 /dev/null /etc/epic-kiosk/secrets/captcha_nvidia_api_key
+sudo install -m 0600 -o 1002 -g 1002 /dev/null /etc/epic-kiosk/secrets/captcha_siliconflow_api_key
+sudo nano /etc/epic-kiosk/secrets/captcha_nvidia_api_key
+sudo nano /etc/epic-kiosk/secrets/captcha_siliconflow_api_key
+```
+
+生成内部接口令牌和 Fernet 凭据密钥：
+
+```bash
+openssl rand -hex 32 | sudo tee /etc/epic-kiosk/secrets/internal_api_token >/dev/null
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n' | sudo tee /etc/epic-kiosk/secrets/epic_credential_keys >/dev/null
+sudo chown 1002:1002 /etc/epic-kiosk/secrets/*
+sudo chmod 0600 /etc/epic-kiosk/secrets/*
 ```
 
 启动服务：
@@ -66,19 +68,20 @@ docker compose up -d --build
 http://服务器IP:18000
 ```
 
-### Linux 一键部署
+### Linux 安装脚本
 
-一键脚本适合快速部署，并会交互式写入 `.env`。当前脚本默认按 SiliconFlow 兼容配置引导；如果使用 NVIDIA 或自定义 OpenAI-compatible 服务，建议使用上面的手动部署流程。
+仓库授权用户完成克隆后，可以运行交互式安装脚本。脚本默认按 SiliconFlow 兼容配置引导；如果使用 NVIDIA 或自定义 OpenAI-compatible 服务，建议使用上面的手动部署流程。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/install.sh | bash
+chmod +x install.sh
+./install.sh
 ```
 
 ## 配置说明
 
 ### API Provider
 
-项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。当前生产实测推荐 NVIDIA，SiliconFlow 和自建兼容网关也可以通过 `.env` 接入。
+项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。默认配置使用 NVIDIA 主供应商和 SiliconFlow 备用供应商；连接超时、429 或 5xx 会触发故障转移。
 
 | Provider | API_BASE_URL | 说明 |
 | --- | --- | --- |
@@ -89,16 +92,18 @@ curl -fsSL https://raw.githubusercontent.com/10000ge10000/epic-kiosk/main/instal
 核心环境变量：
 
 ```env
-API_PROVIDER=nvidia
-API_BASE_URL=https://integrate.api.nvidia.com/v1
-API_KEY=<your-provider-api-key>
-INTERNAL_API_TOKEN=<random-64-character-hex>
-CAPTCHA_MODEL=meta/llama-4-maverick-17b-128e-instruct
-CAPTCHA_MODEL_FALLBACK=meta/llama-4-maverick-17b-128e-instruct
+INTERNAL_API_TOKEN_PATH=/etc/epic-kiosk/secrets/internal_api_token
+EPIC_CREDENTIAL_KEYS_PATH=/etc/epic-kiosk/secrets/epic_credential_keys
+CAPTCHA_NVIDIA_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_nvidia_api_key
+CAPTCHA_SILICONFLOW_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_siliconflow_api_key
+CAPTCHA_PRIMARY_BASE_URL=https://integrate.api.nvidia.com/v1
+CAPTCHA_PRIMARY_MODEL=meta/llama-4-maverick-17b-128e-instruct
+CAPTCHA_SECONDARY_BASE_URL=https://api.siliconflow.cn/v1
+CAPTCHA_SECONDARY_MODEL=Qwen/Qwen3-VL-32B-Instruct
 CAPTCHA_PROVIDER=none
 ```
 
-`INTERNAL_API_TOKEN` 只用于 `web` 与 `worker` 的内部接口认证，必须是独立随机值，不能与模型 API Key 共用。
+`INTERNAL_API_TOKEN` 只用于 `web` 与 `worker` 的内部接口认证，必须是独立随机值，不能与模型 API Key 共用。Secret 文件应保持 `0600`，不要把真实内容写入 `.env`。
 
 ### WARP 出口
 
@@ -124,7 +129,8 @@ WARP 控制接口请求会显式绕过 `HTTP_PROXY` / `HTTPS_PROXY`，避免 Wor
 
 ### 任务恢复
 
-- 验证码失败：默认延迟 15 分钟重试，最多 2 次。
+- 供应商失败：默认延迟 15/60 分钟重试；连续 3 次失败后熔断 10 分钟。
+- 验证码未解：默认 2 小时后补跑一次。
 - 网络超时：默认延迟 10 分钟重试，最多 2 次。
 - Cookie 失效：清理该账号浏览器 profile 后立即重试，默认 1 次。
 - 多游戏领取：成功游戏先入库，失败游戏进入一次延迟补跑。
@@ -134,7 +140,7 @@ WARP 控制接口请求会显式绕过 `HTTP_PROXY` / `HTTPS_PROXY`，避免 Wor
 1. 打开 Web 控制台。
 2. 输入 Epic 邮箱和密码。
 3. 点击「启动引擎」。
-4. 系统验证登录、处理验证码，并把账号加入后续定时任务。
+4. 系统验证登录、处理验证码，并把账号加入后续周免周期调度。
 5. 在「资产」和「本周免费」页面查看领取记录和当前免费游戏。
 
 删除托管账号时需要重新输入密码确认。删除后会清除数据库记录和对应浏览器 profile。
@@ -156,8 +162,9 @@ epic-kiosk/
 
 ## 安全说明
 
-- 为了定时自动登录，Epic 密码会保存在本机 `data/kiosk.db`，不要把 `data/` 同步到公开仓库、公共网盘或不可信备份。
-- `.env` 不应提交到 Git；其中包含模型 API Key 和 `INTERNAL_API_TOKEN`。
+- Epic 凭据使用 Fernet/MultiFernet 加密后保存在 `data/kiosk.db`；数据库、密钥文件和浏览器 profile 必须一起按敏感数据管理。
+- Redis/APScheduler 任务只传递 `run_id`，不传递邮箱或密码。
+- `.env` 不应提交到 Git；真实 API Key、内部令牌和凭据密钥只放在仓库外 Secret 文件中。
 - 日志、截图、Issue、PR 中不要公开 API Key、Cookie、Token、Epic 密码或完整生产配置。
 - 对外开放 Web 控制台前，应额外配置反向代理访问控制、面板鉴权或防火墙白名单。
 
@@ -196,7 +203,7 @@ tail -50 data/logs/runtime-$(date +%Y-%m-%d).log
 
 常见问题：
 
-- `未配置 API_KEY`：检查 `.env` 是否存在，且 `API_KEY` 不是空值或示例占位符。
+- `未配置 API Key`：检查四个 Secret 路径存在、文件权限为 `0600`，并确认模型 Key 文件不是空文件。
 - API 返回 `401` / `403`：Key 无效、额度不可用或 Provider 权限不足。
 - API 返回 `404`：模型 ID 不存在，或当前账号无权调用该模型。
 - 验证码一直失败：先看 Worker 日志中的模型名、API 错误码和 WARP 重启记录，再判断是模型能力、Provider 权限还是 Epic 风控。

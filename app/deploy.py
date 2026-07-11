@@ -29,15 +29,19 @@ from pytz import timezone
 from services.epic_authorization_service import EpicAuthorization, ErrorType
 from services.epic_games_service import EpicAgent, GameCollectResult
 from services.epic_games_service import _is_driver_disconnect_error
-from settings import LOG_DIR, RECORD_DIR
+from settings import LOG_DIR, RECORD_DIR, RUNTIME_DIR
 from settings import settings
-from utils import init_log
+from utils import cleanup_debug_artifacts, init_log
 
 # Initialize logging configuration
 init_log(
     runtime=LOG_DIR.joinpath("runtime.log"),
     error=LOG_DIR.joinpath("error.log"),
 )
+with suppress(Exception):
+    removed_debug_files = cleanup_debug_artifacts(RUNTIME_DIR, retention_days=7)
+    if removed_debug_files:
+        logger.info(f"Expired debug artifacts removed count={removed_debug_files}")
 
 # Default timezone for scheduling operations
 TIMEZONE = timezone("Asia/Shanghai")

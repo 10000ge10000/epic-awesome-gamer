@@ -1,14 +1,11 @@
 FROM python:3.12-slim
 
-ARG DOCKER_CLI_VERSION=5:29.5.3-1~debian.13~trixie
-
 WORKDIR /app
 
 # 预创建挂载点目录（解决 Docker 存储驱动挂载权限问题）
 RUN mkdir -p /app/data /app/app/volumes
 
-# 安装系统依赖和固定版本的 Docker CLI。
-# Worker 只通过宿主机 socket 重启 WARP，不需要 dockerd/containerd/buildx。
+# 安装浏览器运行依赖。WARP 整容器恢复由宿主 watchdog 负责，worker 不安装 Docker CLI。
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     fonts-liberation \
@@ -32,14 +29,9 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     xvfb \
     curl \
-    && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && . /etc/os-release \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli="${DOCKER_CLI_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1002 app && useradd --uid 1002 --gid 1002 --create-home app
 
 # 安装 uv
 RUN pip install --no-cache-dir uv
@@ -56,6 +48,7 @@ RUN uv pip install --system --no-cache \
     "camoufox[geoip]==0.4.11" \
     "playwright==1.56.0" \
     openai \
+    cryptography \
     redis \
     requests \
     beautifulsoup4 \
@@ -239,17 +232,39 @@ PY
 # 安装 Playwright 浏览器依赖
 RUN playwright install firefox && playwright install-deps firefox
 
-# 预装 Camoufox 浏览器 (避免每次运行时下载)
-RUN python3 -c "from camoufox.sync_api import Camoufox; Camoufox(headless=True).__enter__().__exit__(None, None, None)" || true
-
-# 复制业务源码和 worker 脚本
-COPY app ./app
-# 显式覆盖关键验证码/登录模块，避免增量构建遗漏新目录或旧缓存残留
-COPY app/settings.py ./app/settings.py
-COPY app/services/epic_authorization_service.py ./app/services/epic_authorization_service.py
-COPY app/services/captcha ./app/services/captcha
-COPY worker.py ./
-
+# 预装 Camoufox 浏览器，并确保最终运行用户可访问缓存。
+USER app
+RUN python3 -c "from camoufox.sync_api import Camoufox; Camoufox(headless=True).__enter__().__exit__(None, None, None)"
 USER root
 
-CMD ["python3", "worker.py"]
+# hcaptcha-challenger 0.19.0 writes logs beside its installed package at import
+# time. Redirect that hard-coded path to the persistent data volume so the
+# non-root worker can initialize the library without making site-packages writable.
+RUN python3 - <<'PY'
+from pathlib import Path
+
+target = Path("/usr/local/lib/python3.12/site-packages/hcaptcha_challenger/__init__.py")
+text = target.read_text(encoding="utf-8")
+text, import_count = text.replace(
+    "from pathlib import Path\n",
+    "import os\nfrom pathlib import Path\n",
+    1,
+), text.count("from pathlib import Path\n")
+old = 'LOG_DIR = Path(__file__).parent.joinpath("logs", "{time:YYYY-MM-DD}")'
+new = 'LOG_DIR = Path(os.getenv("HCAPTCHA_LOG_DIR", "/app/data/logs/hcaptcha")).joinpath("{time:YYYY-MM-DD}")'
+if import_count != 1 or text.count(old) != 1:
+    raise SystemExit("hcaptcha log path patch anchor not found")
+target.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY
+
+# 复制业务源码和 worker 脚本
+COPY --chown=1002:1002 app ./app
+# 显式覆盖关键验证码/登录模块，避免增量构建遗漏新目录或旧缓存残留
+COPY --chown=1002:1002 app/settings.py ./app/settings.py
+COPY --chown=1002:1002 app/services/epic_authorization_service.py ./app/services/epic_authorization_service.py
+COPY --chown=1002:1002 app/services/captcha ./app/services/captcha
+COPY --chown=1002:1002 worker.py ./
+
+USER app
+
+CMD ["sh", "-c", "umask 077 && exec python3 worker.py"]

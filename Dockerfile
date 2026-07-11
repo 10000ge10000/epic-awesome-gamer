@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -6,8 +6,12 @@ WORKDIR /app
 RUN mkdir -p /app/data
 
 RUN pip install --no-cache-dir \
-    fastapi uvicorn redis apscheduler aiofiles python-multipart jinja2 httpx
+    fastapi uvicorn redis apscheduler aiofiles python-multipart jinja2 httpx cryptography
 
-COPY . .
+RUN groupadd --gid 1002 app && useradd --uid 1002 --gid 1002 --create-home app
+
+COPY --chown=1002:1002 . .
+
+USER app
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

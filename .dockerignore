@@ -42,6 +42,8 @@ Thumbs.db
 .env
 .env.*
 *.local
+secrets/
+*.secret
 
 # Docker 相关（避免递归）
 docker-compose*.yml

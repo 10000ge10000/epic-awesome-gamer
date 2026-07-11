@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import os
 import re
 import time
 from contextlib import suppress
@@ -60,6 +61,10 @@ class GameCollectResult(Enum):
     # 失败：领取阶段验证码未通过或无法确认
     CAPTCHA_FAILED = "captcha_failed"
 
+    PROVIDER_TIMEOUT = "provider_timeout"
+
+    CAPTCHA_UNSOLVED = "captcha_unsolved"
+
     # 失败：验证码通过，但无法确认订单完成或商品入库
     CHECKOUT_FAILED = "checkout_failed"
 
@@ -68,6 +73,62 @@ class GameCollectResult(Enum):
 
     # 失败：Playwright/Camoufox 驱动断连，可延迟重试
     DRIVER_CRASH = "driver_crash"
+
+
+class OrderHistoryUnavailable(RuntimeError):
+    pass
+
+
+def _promotion_count(data: dict) -> int:
+    namespaces: set[str] = set()
+    with suppress(KeyError, TypeError):
+        elements = data["data"]["Catalog"]["searchStore"]["elements"]
+        for element in elements:
+            with suppress(KeyError, IndexError, TypeError):
+                offers = element["promotions"]["promotionalOffers"][0]["promotionalOffers"]
+                if any(
+                    offer["discountSetting"]["discountPercentage"] == 0
+                    for offer in offers
+                ):
+                    namespace = element.get("namespace") or element.get("id")
+                    if namespace:
+                        namespaces.add(str(namespace))
+    return len(namespaces)
+
+
+def _fetch_promotions_data(expected_count: int = 0) -> dict:
+    best_data: dict = {}
+    best_count = -1
+    for attempt in range(1, 4):
+        try:
+            response = httpx.get(
+                URL_PROMOTIONS,
+                params={"local": "zh-CN"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            candidate = response.json()
+        except (httpx.HTTPError, JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                f"promotion_fetch_error attempt={attempt} type={type(exc).__name__}"
+            )
+            if attempt < 3:
+                time.sleep(1)
+            continue
+
+        count = _promotion_count(candidate)
+        if count > best_count:
+            best_data = candidate
+            best_count = count
+        if count >= expected_count:
+            break
+        logger.warning(
+            f"promotion_count_drop expected={expected_count} received={count} "
+            f"attempt={attempt}"
+        )
+        if attempt < 3:
+            time.sleep(1)
+    return best_data
 
 
 def _is_captcha_error(err: Exception | str) -> bool:
@@ -104,20 +165,28 @@ def _is_driver_disconnect_error(err: Exception | str) -> bool:
 
 async def _fetch_order_items(page: Page) -> List[OrderItem]:
     """Read order history with the browser cookie jar without leaving checkout."""
-    history_page = await page.context.new_page()
-    try:
-        response = await history_page.goto(
-            URL_ORDER_HISTORY,
-            wait_until="domcontentloaded",
-            timeout=15000,
+    response = await page.context.request.get(
+        URL_ORDER_HISTORY,
+        headers={"Accept": "application/json"},
+        timeout=15000,
+    )
+    status = response.status
+    content_type = response.headers.get("content-type", "").lower()
+    final_url = response.url
+    if status in {401, 403}:
+        raise OrderHistoryUnavailable(f"session_invalid status={status}")
+    if status == 429 or status >= 500:
+        raise OrderHistoryUnavailable(f"transient status={status}")
+    if status >= 400:
+        raise OrderHistoryUnavailable(f"rejected status={status}")
+    if "json" not in content_type:
+        raise OrderHistoryUnavailable(
+            f"unexpected_content_type status={status} url_host={final_url.split('/')[2]}"
         )
-        if response and response.status >= 400:
-            raise RuntimeError(f"order history page failed: HTTP {response.status}")
-        text = await history_page.locator("body").text_content(timeout=8000)
-        data = json.loads(text or "{}")
-    finally:
-        with suppress(Exception):
-            await history_page.close()
+    try:
+        data = await response.json()
+    except Exception as exc:
+        raise OrderHistoryUnavailable(f"invalid_json status={status}") from exc
 
     completed_orders: List[OrderItem] = []
     for raw_order in data.get("orders", []):
@@ -140,17 +209,17 @@ def get_promotions() -> List[PromotionGame]:
                     return True
 
     promotions: List[PromotionGame] = []
+    cache_key = RUNTIME_DIR.joinpath("promotions.json")
+    expected_count = 0
+    with suppress(Exception):
+        expected_count = _promotion_count(json.loads(cache_key.read_text(encoding="utf-8")))
 
-    resp = httpx.get(URL_PROMOTIONS, params={"local": "zh-CN"})
-
-    try:
-        data = resp.json()
-    except JSONDecodeError as err:
-        logger.error(f"获取促销信息失败: {err}")
+    data = _fetch_promotions_data(expected_count)
+    if not data:
+        logger.error("获取促销信息失败: no valid response")
         return []
 
     with suppress(Exception):
-        cache_key = RUNTIME_DIR.joinpath("promotions.json")
         cache_key.parent.mkdir(parents=True, exist_ok=True)
         cache_key.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
@@ -307,7 +376,34 @@ class EpicAgent:
     async def _check_orders(self, force: bool = False):
         await self._sync_order_history(force=force)
         self._namespaces = [order.namespace for order in self._orders]
-        self._promotions = [p for p in get_promotions() if p.namespace not in self._namespaces]
+        all_promotions = get_promotions()
+        promotions = [p for p in all_promotions if p.namespace not in self._namespaces]
+        raw_targets = os.getenv("EPIC_TARGET_GAMES_JSON", "").strip()
+        if raw_targets:
+            try:
+                target_names = {
+                    str(title).strip().casefold(): str(title).strip()
+                    for title in json.loads(raw_targets)
+                    if str(title).strip()
+                }
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError("invalid target game list") from exc
+            known = {
+                p.title.strip().casefold(): p for p in all_promotions
+                if p.title.strip().casefold() in target_names
+            }
+            selected = [
+                p for p in promotions if p.title.strip().casefold() in target_names
+            ]
+            for normalized, promotion in known.items():
+                if promotion.namespace in self._namespaces:
+                    self.epic_games._emit_game_result(promotion.title, "owned")
+            for normalized in sorted(set(target_names) - set(known)):
+                title = target_names[normalized]
+                logger.warning(f"Retry target is unavailable title={title}")
+                self.epic_games._emit_game_result(title, "unconfirmed")
+            promotions = selected
+        self._promotions = promotions
 
     async def _should_ignore_task(self) -> tuple[bool, GameCollectResult]:
         """
@@ -360,8 +456,17 @@ class EpicAgent:
             if "correction" in current_url or "eula" in current_url:
                 logger.error("❌ 仍在修正页面，无法继续")
                 return False, GameCollectResult.EULA_FAILED
-            logger.error(f"❌ 获取登录状态超时: {e}")
-            return False, GameCollectResult.UNKNOWN_ERROR
+            cookies = []
+            with suppress(Exception):
+                cookies = await self.page.context.cookies()
+            if not cookies:
+                logger.error(f"❌ 获取登录状态超时且无可用 Cookie: {e}")
+                return False, GameCollectResult.COOKIE_INVALID
+            logger.warning(
+                "Epic navigation marker unavailable; continuing with the "
+                "authorized cookie session"
+            )
+            status = None
 
         if status == "false":
             logger.error("❌ Cookie 无效，账号未登录")
@@ -415,6 +520,10 @@ class EpicAgent:
                 error_message = str(e).lower()
                 if _is_driver_disconnect_error(e):
                     return GameCollectResult.DRIVER_CRASH
+                if "provider_timeout" in error_message:
+                    return GameCollectResult.PROVIDER_TIMEOUT
+                if "captcha_unsolved" in error_message:
+                    return GameCollectResult.CAPTCHA_UNSOLVED
                 if _is_captcha_error(e):
                     return GameCollectResult.CAPTCHA_FAILED
                 if "未能确认领取成功" in str(e) or "checkout" in error_message:
@@ -648,6 +757,9 @@ class EpicGames:
 
     @staticmethod
     async def _save_checkout_debug(page: Page, reason: str) -> None:
+        if os.getenv("EPIC_DISABLE_DEBUG_ARTIFACTS") == "1":
+            logger.warning("Disk pressure active; skip checkout debug artifacts")
+            return
         safe_reason = re.sub(r"[^a-zA-Z0-9_.-]+", "_", reason).strip("_") or "unknown"
         debug_dir = RUNTIME_DIR.joinpath("checkout_debug")
         with suppress(Exception):
@@ -759,7 +871,9 @@ class EpicGames:
         try:
             completed_orders = await _fetch_order_items(self.page)
         except Exception as err:
-            logger.warning(f"⚠️ 刷新订单历史失败: {err}")
+            logger.warning(
+                f"order_history_unavailable type={type(err).__name__} detail={str(err)[:160]}"
+            )
             completed_orders = []
         self._orders = completed_orders
 
@@ -1035,6 +1149,10 @@ class EpicGames:
             logger.success("🎉 领取成功：订单历史已确认入库")
             return True
 
+        if check_order_history and await self._product_is_owned(page, product_url):
+            logger.success("🎉 领取成功：商品页已确认入库")
+            return True
+
         return False
 
     async def _wait_for_checkout_confirmation(
@@ -1237,6 +1355,15 @@ class EpicGames:
         )
 
         for promotion in promotions:
+            soft_deadline = float(os.getenv("TASK_SOFT_DEADLINE_EPOCH", "0") or 0)
+            minimum_budget = float(os.getenv("TASK_MIN_GAME_BUDGET_SECONDS", "180"))
+            if soft_deadline and soft_deadline - time.time() < minimum_budget:
+                logger.warning(
+                    f"Task soft deadline reached; defer game title={promotion.title}"
+                )
+                outcomes[promotion.title] = "deferred"
+                self._emit_game_result(promotion.title, "deferred")
+                continue
             url = promotion.url
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -1343,16 +1470,17 @@ class EpicGames:
                 if _is_driver_disconnect_error(err):
                     raise RuntimeError(f"driver checkout failed: {err}") from err
                 logger.warning(f"⚠️ 游戏领取失败，继续处理其他周免游戏: {promotion.title} - {err}")
-                outcomes[promotion.title] = "failed"
-                self._emit_game_result(promotion.title, "failed")
+                status = "deferred" if "provider_timeout" in str(err) else "unconfirmed"
+                outcomes[promotion.title] = status
+                self._emit_game_result(promotion.title, status)
                 continue
 
             if checkout_success:
                 outcomes[promotion.title] = "claimed"
                 self._emit_game_result(promotion.title, "claimed")
             else:
-                outcomes[promotion.title] = "failed"
-                self._emit_game_result(promotion.title, "failed")
+                outcomes[promotion.title] = "unconfirmed"
+                self._emit_game_result(promotion.title, "unconfirmed")
             # ------------------------------------------------------------
 
         return has_pending_cart_items, outcomes
@@ -1433,7 +1561,11 @@ class EpicGames:
                     self._emit_game_result(promotion.title, "failed")
                 logger.error("❌ 购物车游戏领取失败")
 
-        failed = [title for title, status in outcomes.items() if status == "failed"]
+        failed = [
+            title
+            for title, status in outcomes.items()
+            if status in {"failed", "deferred", "unconfirmed"}
+        ]
         if failed:
             raise RuntimeError(f"以下游戏未能确认领取成功: {', '.join(failed)}")
 

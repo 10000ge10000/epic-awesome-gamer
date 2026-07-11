@@ -1,0 +1,16 @@
+[Unit]
+Description=Epic Kiosk WARP watchdog
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/epic-kiosk/scripts/warp_watchdog.sh
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=epic-kiosk
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/epic-kiosk

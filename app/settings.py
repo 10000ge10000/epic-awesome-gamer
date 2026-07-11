@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import random
+import time
 from pathlib import Path
 from typing import Any, List, Union
 
@@ -18,6 +19,94 @@ from hcaptcha_challenger.agent import AgentConfig
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 from loguru import logger
+import redis as redis_client
+from provider_router import ProviderRouter, ProviderSpec, ProviderUnavailable
+
+
+_CAPTCHA_SESSION_UNAVAILABLE_PROVIDERS: set[str] = set()
+_CAPTCHA_LAST_CALL_PROVIDER_TIMEOUT = False
+_CAPTCHA_PROVIDER_FAILURE_THRESHOLD = int(os.getenv("CAPTCHA_PROVIDER_FAILURE_THRESHOLD", "3"))
+_CAPTCHA_PROVIDER_CIRCUIT_SECONDS = int(os.getenv("CAPTCHA_PROVIDER_CIRCUIT_SECONDS", "600"))
+
+
+def _provider_circuit_open(provider: str) -> bool:
+    try:
+        client = redis_client.Redis(
+            host=os.getenv("REDIS_HOST", "redis"),
+            port=6379,
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+        )
+        return bool(client.exists(f"metrics:provider_circuit:{provider}"))
+    except Exception:
+        return False
+
+
+def _filter_session_captcha_providers(providers: list[tuple]) -> list[tuple]:
+    return [
+        provider
+        for provider in providers
+        if provider[0] not in _CAPTCHA_SESSION_UNAVAILABLE_PROVIDERS
+        and not _provider_circuit_open(provider[0])
+    ]
+
+
+def captcha_last_call_provider_timeout() -> bool:
+    return _CAPTCHA_LAST_CALL_PROVIDER_TIMEOUT
+
+
+def _read_secret(env_name: str, file_env_name: str) -> str:
+    file_name = os.getenv(file_env_name, "").strip()
+    if file_name:
+        return Path(file_name).read_text(encoding="utf-8").strip()
+    return os.getenv(env_name, "").strip()
+
+
+def _record_provider_event(event: dict[str, Any]) -> None:
+    logger.info(json.dumps(event, ensure_ascii=True, separators=(",", ":")))
+    provider = str(event.get("provider", "unknown"))
+    outcome = str(event.get("outcome", "unknown"))
+    if outcome in {"network_error", "http_error", "invalid_json"}:
+        _CAPTCHA_SESSION_UNAVAILABLE_PROVIDERS.add(provider)
+    elif outcome == "success":
+        _CAPTCHA_SESSION_UNAVAILABLE_PROVIDERS.discard(provider)
+    try:
+        client = redis_client.Redis(
+            host=os.getenv("REDIS_HOST", "redis"),
+            port=6379,
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+        )
+        key = f"metrics:provider:{provider}"
+        mapping = {
+            "last_outcome": str(event.get("outcome", "unknown")),
+            "last_elapsed": str(event.get("elapsed", "")),
+            "last_request_id": str(event.get("request_id", "")),
+            "updated_at": str(int(time.time())),
+        }
+        client.hset(key, mapping=mapping)
+        client.hincrby(key, "attempts", 1)
+        if outcome == "success":
+            client.hset(key, "consecutive_failures", 0)
+            client.delete(f"metrics:provider_circuit:{provider}")
+        elif outcome in {"network_error", "http_error", "invalid_json"}:
+            failures = client.hincrby(key, "consecutive_failures", 1)
+            if failures >= _CAPTCHA_PROVIDER_FAILURE_THRESHOLD:
+                client.setex(
+                    f"metrics:provider_circuit:{provider}",
+                    _CAPTCHA_PROVIDER_CIRCUIT_SECONDS,
+                    "1",
+                )
+        if outcome == "circuit_opened":
+            client.setex(
+                f"metrics:provider_circuit:{provider}",
+                int(event.get("ttl_seconds", _CAPTCHA_PROVIDER_CIRCUIT_SECONDS)),
+                "1",
+            )
+    except Exception:
+        pass
 
 # --- 核心路径定义 ---
 PROJECT_ROOT = Path(__file__).parent
@@ -40,7 +129,8 @@ class EpicSettings(AgentConfig):
     # [基础配置] OpenAI 兼容 API Key
     # 新部署使用 API_KEY；兼容旧版 SILICONFLOW_API_KEY，避免已有 .env 直接失效。
     API_KEY: SecretStr | None = Field(
-        default_factory=lambda: os.getenv("API_KEY") or os.getenv("SILICONFLOW_API_KEY"),
+        default_factory=lambda: _read_secret("API_KEY", "API_KEY_FILE")
+        or os.getenv("SILICONFLOW_API_KEY"),
         description="OpenAI-compatible API Key",
     )
 
@@ -65,12 +155,50 @@ class EpicSettings(AgentConfig):
 
     # === 验证码模型（需要视觉能力）===
     CAPTCHA_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv(
+            "CAPTCHA_PRIMARY_MODEL",
+            os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct"),
+        ),
         description="验证码识别模型（主力）",
     )
     CAPTCHA_MODEL_FALLBACK: str = Field(
-        default=os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen3-VL-30B-A3B-Instruct"),
+        default=os.getenv(
+            "CAPTCHA_SECONDARY_MODEL",
+            os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen3-VL-32B-Instruct"),
+        ),
         description="验证码识别模型（备用）",
+    )
+
+    CAPTCHA_PRIMARY_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv(
+            "CAPTCHA_PRIMARY_BASE_URL", "https://integrate.api.nvidia.com/v1"
+        )
+    )
+    CAPTCHA_PRIMARY_API_KEY: SecretStr = Field(
+        default_factory=lambda: SecretStr(
+            _read_secret("CAPTCHA_NVIDIA_API_KEY", "CAPTCHA_NVIDIA_API_KEY_FILE")
+            or _read_secret("API_KEY", "API_KEY_FILE")
+        )
+    )
+    CAPTCHA_PRIMARY_MODEL: str = Field(
+        default_factory=lambda: os.getenv(
+            "CAPTCHA_PRIMARY_MODEL", "meta/llama-4-maverick-17b-128e-instruct"
+        )
+    )
+    CAPTCHA_SECONDARY_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv(
+            "CAPTCHA_SECONDARY_BASE_URL", "https://api.siliconflow.cn/v1"
+        )
+    )
+    CAPTCHA_SECONDARY_API_KEY: SecretStr = Field(
+        default_factory=lambda: SecretStr(
+            _read_secret("CAPTCHA_SILICONFLOW_API_KEY", "CAPTCHA_SILICONFLOW_API_KEY_FILE")
+        )
+    )
+    CAPTCHA_SECONDARY_MODEL: str = Field(
+        default_factory=lambda: os.getenv(
+            "CAPTCHA_SECONDARY_MODEL", "Qwen/Qwen3-VL-32B-Instruct"
+        )
     )
 
     # === 主力模型（一般文本任务）===
@@ -86,23 +214,24 @@ class EpicSettings(AgentConfig):
     # === hcaptcha-challenger 内置模型配置（必须覆盖默认值）===
     # 这些属性会覆盖 AgentConfig 的默认 gemini 模型名称
     CHALLENGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
         description="挑战分类模型",
     )
     IMAGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
         description="图像分类模型 (image_label_binary)",
     )
     SPATIAL_POINT_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
         description="空间点推理模型 (image_label_area_select)",
     )
     SPATIAL_PATH_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
         description="空间路径推理模型 (image_drag_drop)",
     )
 
     EPIC_EMAIL: str = Field(default_factory=lambda: os.getenv("EPIC_EMAIL", ""))
+    EPIC_PROFILE_ID: str = Field(default_factory=lambda: os.getenv("EPIC_PROFILE_ID", ""))
     EPIC_PASSWORD: SecretStr = Field(
         default_factory=lambda: SecretStr(os.getenv("EPIC_PASSWORD", ""))
     )
@@ -178,7 +307,10 @@ class EpicSettings(AgentConfig):
 
     @property
     def user_data_dir(self) -> Path:
-        target_ = USER_DATA_DIR.joinpath(self.EPIC_EMAIL)
+        profile_id = self.EPIC_PROFILE_ID.strip()
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", profile_id):
+            raise ValueError("EPIC_PROFILE_ID is invalid")
+        target_ = USER_DATA_DIR.joinpath(profile_id)
         target_.mkdir(parents=True, exist_ok=True)
         return target_
 
@@ -357,6 +489,8 @@ def _apply_openai_compatible_patch():
         # ==========================================
         # 辅助函数：调用 OpenAI API（不使用 JSON mode）
         # ==========================================
+        provider_router = ProviderRouter(event_sink=_record_provider_event)
+
         async def _call_openai_api(
             model: str,
             messages: List[dict],
@@ -369,6 +503,7 @@ def _apply_openai_compatible_patch():
             调用 OpenAI 兼容 API
             注意：不使用 response_format，因为部分视觉模型不支持
             """
+            global _CAPTCHA_LAST_CALL_PROVIDER_TIMEOUT
             request_base_url = base_url
             use_opencode_free = str(model).endswith("-free")
             if use_opencode_free:
@@ -442,35 +577,48 @@ JSON Schema:
                 # 注意：不使用 response_format，部分视觉模型不支持
             }
 
-            retryable_statuses = {429, 500, 502, 503, 504}
-            last_error = None
             is_structured_captcha = response_schema is not None
-            api_timeout = float(os.getenv("CAPTCHA_API_TIMEOUT", "45")) if is_structured_captcha else 120.0
-            max_attempts = int(os.getenv("CAPTCHA_API_RETRIES", "1")) if is_structured_captcha else 3
+            if is_structured_captcha:
+                providers = [
+                    (
+                        "nvidia",
+                        settings.CAPTCHA_PRIMARY_BASE_URL,
+                        settings.CAPTCHA_PRIMARY_API_KEY.get_secret_value(),
+                        settings.CAPTCHA_PRIMARY_MODEL,
+                        45.0,
+                    ),
+                    (
+                        "siliconflow",
+                        settings.CAPTCHA_SECONDARY_BASE_URL,
+                        settings.CAPTCHA_SECONDARY_API_KEY.get_secret_value(),
+                        settings.CAPTCHA_SECONDARY_MODEL,
+                        60.0,
+                    ),
+                ]
+                total_budget = float(os.getenv("CAPTCHA_TOTAL_API_BUDGET", "110"))
+            else:
+                providers = [(API_PROVIDER, request_base_url, api_key, model, 120.0)]
+                total_budget = 120.0
 
-            async with httpx.AsyncClient(timeout=api_timeout) as client:
-                for attempt in range(1, max_attempts + 1):
-                    try:
-                        response = await client.post(url, headers=headers, json=payload)
-                        if response.status_code == 200:
-                            return response.json()
-
-                        error_msg = f"API 调用失败: {response.status_code} - {response.text}"
-                        last_error = Exception(error_msg)
-                        logger.error(f"❌ {error_msg}")
-                        if response.status_code not in retryable_statuses or attempt == max_attempts:
-                            raise last_error
-                    except httpx.HTTPError as exc:
-                        last_error = exc
-                        logger.error(f"❌ API 网络异常: {exc}")
-                        if attempt == max_attempts:
-                            raise
-
-                    delay = min(2 ** (attempt - 1), 4) + random.uniform(0, 0.5)
-                    logger.warning(f"⏳ API 调用失败，{delay:.1f}s 后重试 [{attempt}/{max_attempts}]")
-                    await asyncio.sleep(delay)
-
-            raise last_error or RuntimeError("API 调用失败")
+            if is_structured_captcha:
+                providers = _filter_session_captcha_providers(providers)
+            specs = [ProviderSpec(*provider) for provider in providers]
+            started = asyncio.get_running_loop().time()
+            try:
+                result = await provider_router.request(payload, specs, total_budget)
+                logger.info(
+                    f"captcha_provider_result=success elapsed="
+                    f"{asyncio.get_running_loop().time() - started:.2f}s"
+                )
+                _CAPTCHA_LAST_CALL_PROVIDER_TIMEOUT = False
+                return result
+            except Exception as exc:
+                _CAPTCHA_LAST_CALL_PROVIDER_TIMEOUT = isinstance(exc, ProviderUnavailable)
+                logger.error(
+                    f"captcha_provider_result=failed error={type(exc).__name__} "
+                    f"elapsed={asyncio.get_running_loop().time() - started:.2f}s"
+                )
+                raise
 
         # ==========================================
         # 劫持 Client 初始化
@@ -673,13 +821,13 @@ JSON Schema:
                 error_str = str(e)
                 logger.error(f"❌ API 调用异常: {error_str}")
 
-                # 尝试使用备用模型重试
+                # 验证码请求已在 _call_openai_api 内完成跨供应商故障转移，禁止重复调用。
                 if is_captcha_task:
-                    fallback_model = settings.CAPTCHA_MODEL_FALLBACK
-                    logger.debug(f"⚠️ 尝试使用备用验证码模型: {fallback_model}")
-                else:
-                    fallback_model = settings.PRIMARY_MODEL_FALLBACK
-                    logger.debug(f"⚠️ 尝试使用备用主力模型: {fallback_model}")
+                    raise
+
+                # 尝试使用备用模型重试
+                fallback_model = settings.PRIMARY_MODEL_FALLBACK
+                logger.debug(f"⚠️ 尝试使用备用主力模型: {fallback_model}")
 
                 # 重试一次
                 try:

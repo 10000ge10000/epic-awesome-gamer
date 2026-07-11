@@ -23,9 +23,11 @@ services:
   # Redis: 消息队列（官方镜像）
   # ============================================================
   redis:
-    image: redis:alpine
+    image: redis@sha256:c5e375abb885e6b2021c0377879e4890bf76f9065b8922ffc113f2b226b9fc17
     container_name: epic-redis
     restart: always
+    volumes:
+      - ./data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -34,8 +36,9 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "1m"
-        max-file: "1"
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 256m
 
   # ============================================================
   # Web: 前端服务（FastAPI）
@@ -47,30 +50,44 @@ services:
     image: epic-kiosk-web:local
     container_name: epic-web
     ports:
-      - "18000:8000"
+      - "127.0.0.1:18000:8000"
     volumes:
       - ./data:/app/data
     environment:
       - REDIS_HOST=redis
       - TZ=Asia/Shanghai
       - ENABLE_APSCHEDULER=true
-      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 中配置 INTERNAL_API_TOKEN}
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-172.22.0.1}
+      - INTERNAL_API_TOKEN_FILE=/run/secrets/internal_api_token
+      - EPIC_CREDENTIAL_KEYS_FILE=/run/secrets/epic_credential_keys
       - TASK_LOCK_SECONDS=86400
       - CONFIRM_TOKEN_SECONDS=86400
       - DAILY_SCHEDULE_LOCK_SECONDS=86400
-      # 历史数据偏移量配置（用于补偿丢失的记录，其他用户无需修改）
-      - CLAIM_HISTORY_OFFSET=1132
-      - ACCOUNT_VERIFIED_OFFSET=140
-      - ACCOUNT_TOTAL_OFFSET=140
+      - CLAIM_BATCH_SIZE=${CLAIM_BATCH_SIZE:-5}
+      - CLAIM_BATCH_INTERVAL_SECONDS=${CLAIM_BATCH_INTERVAL_SECONDS:-600}
+      - PROMOTION_REFRESH_INTERVAL_SECONDS=${PROMOTION_REFRESH_INTERVAL_SECONDS:-3600}
+      # 可选历史数据偏移量，默认不补偿。
+      - CLAIM_HISTORY_OFFSET=${CLAIM_HISTORY_OFFSET:-0}
+      - ACCOUNT_VERIFIED_OFFSET=${ACCOUNT_VERIFIED_OFFSET:-0}
+      - ACCOUNT_TOTAL_OFFSET=${ACCOUNT_TOTAL_OFFSET:-0}
     depends_on:
       redis:
         condition: service_healthy
     restart: always
+    secrets:
+      - internal_api_token
+      - epic_credential_keys
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    mem_limit: 512m
     logging:
       driver: json-file
       options:
-        max-size: "1m"
-        max-file: "1"
+        max-size: "10m"
+        max-file: "3"
 
   # ============================================================
   # WARP 代理：单容器多出口（10 个独立 WARP 实例）
@@ -97,8 +114,9 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "1m"
-        max-file: "1"
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 5g
 
 
   # ============================================================
@@ -112,15 +130,13 @@ services:
       dockerfile: Dockerfile.worker
     image: epic-kiosk-worker:local
     container_name: epic-worker
-    user: root
+    user: "1002:1002"
     init: true
     cpus: "2.00"
     pids_limit: 300
     volumes:
       - ./data:/app/data
       - ./data:/app/app/volumes
-      # Docker socket - 允许 worker 重启 WARP 容器
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - REDIS_HOST=redis
       - TZ=Asia/Shanghai
@@ -128,15 +144,22 @@ services:
       - ENABLE_APSCHEDULER=false
       - API_PROVIDER=${API_PROVIDER:-siliconflow}
       - API_BASE_URL=${API_BASE_URL:-https://api.siliconflow.cn/v1}
+      - API_KEY_FILE=/run/secrets/captcha_nvidia_api_key
       - OPENCODE_BASE_URL=https://opencode.ai/zen
-      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 中配置 INTERNAL_API_TOKEN}
+      - INTERNAL_API_TOKEN_FILE=/run/secrets/internal_api_token
+      - EPIC_CREDENTIAL_KEYS_FILE=/run/secrets/epic_credential_keys
+      - CAPTCHA_NVIDIA_API_KEY_FILE=/run/secrets/captcha_nvidia_api_key
+      - CAPTCHA_SILICONFLOW_API_KEY_FILE=/run/secrets/captcha_siliconflow_api_key
       - TASK_TIMEOUT_SECONDS=600
+      - TASK_SOFT_TIMEOUT_SECONDS=480
+      - TASK_MIN_GAME_BUDGET_SECONDS=180
       - TASK_LOCK_SECONDS=86400
-      - HCAPTCHA_EXECUTION_TIMEOUT=${HCAPTCHA_EXECUTION_TIMEOUT:-240}
-      - HCAPTCHA_RESPONSE_TIMEOUT=${HCAPTCHA_RESPONSE_TIMEOUT:-120}
+      - HCAPTCHA_EXECUTION_TIMEOUT=${HCAPTCHA_EXECUTION_TIMEOUT:-180}
+      - HCAPTCHA_RESPONSE_TIMEOUT=${HCAPTCHA_RESPONSE_TIMEOUT:-90}
       - HCAPTCHA_PAYLOAD_TIMEOUT=${HCAPTCHA_PAYLOAD_TIMEOUT:-90}
       - HCAPTCHA_FRAME_TIMEOUT=20
-      - HCAPTCHA_SOLVE_MAX_ATTEMPTS=4
+      - HCAPTCHA_SOLVE_MAX_ATTEMPTS=2
+      - HCAPTCHA_LOG_DIR=/app/data/logs/hcaptcha
       # WARP HTTP 代理（容器内部网络）
       - HTTP_PROXY=http://epic-warp:19000
       - HTTPS_PROXY=http://epic-warp:19000
@@ -152,18 +175,16 @@ services:
       # Supports NVIDIA, SiliconFlow, or custom OpenAI-compatible providers.
       # Do not commit real keys in docker-compose.yml.
       # ============================================================
-      - API_KEY=${API_KEY:?set API_KEY in .env}
       # 环境变量（绕过父类验证器，无需修改）
       - GEMINI_API_KEY=not_used
       # ============================================================
       # 模型配置（SiliconFlow 实测通过）
-      - CAPTCHA_MODEL=${CAPTCHA_MODEL:-Qwen/Qwen3-VL-32B-Instruct}
-      - CAPTCHA_MODEL_FALLBACK=${CAPTCHA_MODEL_FALLBACK:-Qwen/Qwen3-VL-30B-A3B-Instruct}
+      - CAPTCHA_PRIMARY_BASE_URL=${CAPTCHA_PRIMARY_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      - CAPTCHA_PRIMARY_MODEL=${CAPTCHA_PRIMARY_MODEL:-meta/llama-4-maverick-17b-128e-instruct}
+      - CAPTCHA_SECONDARY_BASE_URL=${CAPTCHA_SECONDARY_BASE_URL:-https://api.siliconflow.cn/v1}
+      - CAPTCHA_SECONDARY_MODEL=${CAPTCHA_SECONDARY_MODEL:-Qwen/Qwen3-VL-32B-Instruct}
       - CAPTCHA_RESPONSE_MAX_TOKENS=1200
-      - CAPTCHA_API_TIMEOUT=${CAPTCHA_API_TIMEOUT:-60}
-      - CAPTCHA_API_RETRIES=1
-      - CAPTCHA_FALLBACK_AFTER_CALLS=0
-      - CAPTCHA_FALLBACK_TIME_WINDOW=300
+      - CAPTCHA_TOTAL_API_BUDGET=110
       # 可选：外部验证码服务商 fallback（默认关闭；Key 只放 .env）
       - CAPTCHA_PROVIDER=${CAPTCHA_PROVIDER:-none}
       - CAPTCHA_PROVIDER_API_KEY=${CAPTCHA_PROVIDER_API_KEY:-}
@@ -181,7 +202,7 @@ services:
       - WARP_RESTART_COOLDOWN_SECONDS=300
       - WARP_CONTROL_RESTART_RETRIES=${WARP_CONTROL_RESTART_RETRIES:-3}
       - WARP_CONTROL_RESTART_BACKOFF_SECONDS=${WARP_CONTROL_RESTART_BACKOFF_SECONDS:-5}
-      - WARP_CONTAINER_FALLBACK_RESTARTS=${WARP_CONTAINER_FALLBACK_RESTARTS:-1}
+      - WARP_CONTAINER_FALLBACK_RESTARTS=0
       - TASK_SPACING_SECONDS=5
     depends_on:
       redis:
@@ -189,8 +210,46 @@ services:
       warp:
         condition: service_healthy
     restart: always
+    secrets:
+      - internal_api_token
+      - epic_credential_keys
+      - captcha_nvidia_api_key
+      - captcha_siliconflow_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,redis; r=redis.Redis(host=os.getenv('REDIS_HOST','redis')); v=r.get('worker:heartbeat'); raise SystemExit(0 if v and time.time()-float(v)<90 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    mem_limit: 4g
     logging:
       driver: json-file
       options:
-        max-size: "1m"
-        max-file: "1"
+        max-size: "10m"
+        max-file: "3"
+
+  test:
+    profiles: ["test"]
+    init: true
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+      - /usr/local/lib/python3.12/site-packages/hcaptcha_challenger/logs:size=64m
+    environment:
+      - DATA_DIR=/tmp/epic-kiosk-test
+      - ENABLE_APSCHEDULER=false
+      - INTERNAL_API_TOKEN=test-internal-token
+      - EPIC_CREDENTIAL_KEYS=9QKUvZF-uPSzD4suKpprhwUTUyoj5nrR9BgeJeAs5mM=
+
+secrets:
+  internal_api_token:
+    file: ${INTERNAL_API_TOKEN_PATH:?set INTERNAL_API_TOKEN_PATH}
+  epic_credential_keys:
+    file: ${EPIC_CREDENTIAL_KEYS_PATH:?set EPIC_CREDENTIAL_KEYS_PATH}
+  captcha_nvidia_api_key:
+    file: ${CAPTCHA_NVIDIA_API_KEY_PATH:?set CAPTCHA_NVIDIA_API_KEY_PATH}
+  captcha_siliconflow_api_key:
+    file: ${CAPTCHA_SILICONFLOW_API_KEY_PATH:?set CAPTCHA_SILICONFLOW_API_KEY_PATH}

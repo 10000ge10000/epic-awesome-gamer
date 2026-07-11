@@ -1,0 +1,38 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+
+RUN python - <<'PY'
+import subprocess
+import sys
+import tomllib
+
+with open("pyproject.toml", "rb") as handle:
+    dependencies = tomllib.load(handle)["project"]["dependencies"]
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", "--no-cache-dir", *dependencies, "pytest", "fakeredis"]
+)
+PY
+
+COPY app ./app
+COPY scripts ./scripts
+COPY main.py worker.py ./
+COPY tests ./tests
+
+RUN pip install --no-cache-dir --no-deps .
+
+RUN mkdir -p /usr/local/lib/python3.12/site-packages/hcaptcha_challenger/logs
+
+ENV DATA_DIR=/tmp/epic-kiosk-test \
+    ENABLE_APSCHEDULER=false \
+    PYTHONPATH=/app:/app/app
+
+CMD ["pytest", "-q", "-p", "no:cacheprovider"]

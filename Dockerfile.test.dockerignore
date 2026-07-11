@@ -1,0 +1,10 @@
+.git/
+.env*
+data/
+secrets/
+.codex-backups/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+docs/
+assets/

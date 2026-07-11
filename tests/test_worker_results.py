@@ -6,21 +6,94 @@ import sys
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import worker
 
 
 class WorkerResultTests(unittest.TestCase):
+    def test_scheduled_queue_dispatch_contains_only_run_id(self):
+        run_id = "46f83017-9d38-4b02-a0bc-fd79864e0675"
+        payload = json.dumps({"run_id": run_id})
+        fake_redis = MagicMock()
+        fake_redis.zrangebyscore.return_value = [payload]
+        fake_redis.zrem.return_value = 1
+        fake_redis.set.return_value = True
+        with (
+            patch.object(worker, "r", fake_redis),
+            patch.object(
+                worker,
+                "cycle_run_dispatch_status",
+                return_value=("private@example.com", "cycle-id"),
+            ),
+            patch.object(worker, "update_task") as update_task,
+        ):
+            self.assertEqual(worker.move_due_scheduled_tasks(), 1)
+
+        queued_payload = fake_redis.rpush.call_args.args[1]
+        self.assertEqual(json.loads(queued_payload), {"run_id": run_id})
+        self.assertNotIn("private@example.com", queued_payload)
+        self.assertNotIn("password", queued_payload.lower())
+        update_task.assert_called_once_with(worker.DB_PATH, run_id, state="queued")
+
+    def test_captcha_retry_does_not_restart_warp(self):
+        task = {
+            "run_id": "46f83017-9d38-4b02-a0bc-fd79864e0675",
+            "email": "private@example.com",
+            "retry_data": {},
+        }
+        fake_redis = MagicMock()
+        with (
+            patch.object(worker, "r", fake_redis),
+            patch.object(worker, "set_task_feedback"),
+            patch.object(worker, "restart_warp_for_retry") as restart,
+            patch.object(worker.time, "time", return_value=1000),
+        ):
+            self.assertTrue(worker.schedule_failure_retry(task, "captcha_unsolved", 4))
+
+        restart.assert_not_called()
+        self.assertEqual(task["retry_data"]["warp_index"], 4)
+
+    def test_log_redaction_removes_credentials_and_tokens(self):
+        email = "user@example.com"
+        password = "plain-password"
+        token = "A" * 100
+        output = worker.redact_log_line(
+            f"email={email} password={password} Authorization=Bearer-{token}", email, password
+        )
+        self.assertNotIn(email, output)
+        self.assertNotIn(password, output)
+        self.assertNotIn(token, output)
+
     def test_parse_game_result(self):
         payload = {"title": "Game A", "status": "claimed"}
         line = f"prefix GAME_RESULT:{json.dumps(payload)}"
         self.assertEqual(worker.parse_game_result_line(line), ("Game A", "claimed"))
 
+    def test_parse_game_result_accepts_deferred_and_unconfirmed(self):
+        for status in ("deferred", "unconfirmed"):
+            line = f'GAME_RESULT:{{"title":"Game A","status":"{status}"}}'
+            self.assertEqual(worker.parse_game_result_line(line), ("Game A", status))
+
     def test_parse_game_result_rejects_unknown_status(self):
         line = 'GAME_RESULT:{"title":"Game A","status":"maybe"}'
         with self.assertRaises(ValueError):
             worker.parse_game_result_line(line)
+
+    def test_network_retry_rotates_warp_index(self):
+        with patch.object(worker, "WARP_PROXY_COUNT", 10):
+            self.assertEqual(worker.next_retry_warp_index("network_timeout", 4), 5)
+            self.assertEqual(worker.next_retry_warp_index("driver_crash", 9), 0)
+            self.assertEqual(worker.next_retry_warp_index("provider_timeout", 4), 4)
+
+    def test_task_warp_index_uses_retry_override(self):
+        task = {"email": "user@example.com", "retry_data": {"warp_index": 15}}
+        with (
+            patch.object(worker, "WARP_PROXY_COUNT", 10),
+            patch.object(worker, "get_warp_index_for_email", return_value=4),
+        ):
+            self.assertEqual(worker.get_task_warp_index(task), 5)
+            self.assertEqual(worker.get_task_warp_index({"email": task["email"]}), 4)
 
     def test_summarize_multiple_games_and_partial_failure(self):
         successful, claimed, failed = worker.summarize_game_results(
@@ -28,11 +101,13 @@ class WorkerResultTests(unittest.TestCase):
                 "Game A": "claimed",
                 "Game B": "owned",
                 "Game C": "failed",
+                "Game D": "deferred",
+                "Game E": "unconfirmed",
             }
         )
         self.assertEqual(successful, ["Game A", "Game B"])
         self.assertEqual(claimed, ["Game A"])
-        self.assertEqual(failed, ["Game C"])
+        self.assertEqual(failed, ["Game C", "Game D", "Game E"])
 
     def test_process_output_hard_timeout(self):
         process = subprocess.Popen(
