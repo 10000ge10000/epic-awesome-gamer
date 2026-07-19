@@ -75,6 +75,7 @@ ENABLE_APSCHEDULER = os.getenv("ENABLE_APSCHEDULER", "false").lower() in {
     "yes",
     "on",
 }
+# 保留旧环境变量兼容性；当前调度频率由 PROMOTION_REFRESH_INTERVAL_SECONDS 控制。
 DAILY_SCHEDULE_LOCK_SECONDS = int(os.getenv("DAILY_SCHEDULE_LOCK_SECONDS", "86400"))
 SCHEDULER_INSTANCE_ID = os.getenv("HOSTNAME", "web")
 CLAIM_BATCH_SIZE = max(1, int(os.getenv("CLAIM_BATCH_SIZE", "5")))
@@ -673,18 +674,26 @@ async def refresh_promotion_cycle() -> None:
         obsolete = cancel_obsolete_scheduled_runs(DB_PATH, cycle_id)
         for run_id in obsolete:
             r.zrem(SCHEDULED_TASK_QUEUE, _scheduled_payload(run_id))
+        # 每次刷新都补齐当前周期尚未分配的账号。create_cycle_assignments
+        # 会排除已有 assignment/completion，因此在周期未变化时不会重复建任务，
+        # 但可以覆盖“周期开始后新托管账号加入”的情况。
+        created = create_cycle_assignments(
+            DB_PATH,
+            cycle_id,
+            candidate,
+            start_at=int(datetime.now(timezone.utc).timestamp()),
+            batch_size=CLAIM_BATCH_SIZE,
+            batch_interval_seconds=CLAIM_BATCH_INTERVAL_SECONDS,
+        )
         if changed:
-            created = create_cycle_assignments(
-                DB_PATH,
-                cycle_id,
-                candidate,
-                start_at=int(datetime.now(timezone.utc).timestamp()),
-                batch_size=CLAIM_BATCH_SIZE,
-                batch_interval_seconds=CLAIM_BATCH_INTERVAL_SECONDS,
-            )
             print(
                 f"Promotion cycle changed: cycle={cycle_id[:12]} "
                 f"games={len(candidate)} scheduled={len(created)}"
+            )
+        elif created:
+            print(
+                f"Promotion cycle assignments backfilled: cycle={cycle_id[:12]} "
+                f"scheduled={len(created)}"
             )
         _persist_scheduled_runs(scheduled_cycle_runs(DB_PATH, cycle_id))
     except Exception as exc:
@@ -706,7 +715,7 @@ scheduler.add_job(
 @app.on_event("startup")
 async def start_scheduler():
     if not ENABLE_APSCHEDULER:
-        print("⏸️ APScheduler 未启用，跳过每日自动调度")
+        print("⏸️ APScheduler 未启用，跳过自动调度")
         return
     if not scheduler.running:
         scheduler.start()

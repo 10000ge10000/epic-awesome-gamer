@@ -1264,6 +1264,8 @@ def run_task(task_data):
     env["EPIC_EMAIL"] = email
     env["EPIC_PASSWORD"] = password
     env["EPIC_PROFILE_ID"] = profile_id
+    if mode == "verify":
+        env["EPIC_VERIFY_ONLY"] = "1"
     target_games = task_data.get("retry_data", {}).get("target_games")
     if isinstance(target_games, list) and target_games:
         env["EPIC_TARGET_GAMES_JSON"] = json.dumps(target_games, ensure_ascii=False)

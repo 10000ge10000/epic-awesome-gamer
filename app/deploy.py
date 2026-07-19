@@ -113,6 +113,11 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
 
             logger.debug("Authentication completed successfully")
 
+            if os.getenv("EPIC_VERIFY_ONLY", "").lower() in {"1", "true", "yes", "on"}:
+                # 托管验证只确认 Epic 登录，不应顺带领取当前周免游戏。
+                logger.success("✅ 登录成功，验证模式跳过领取")
+                return ErrorType.SUCCESS
+
             # 登录 Agent 会注册 hCaptcha response 监听器。使用同一浏览器
             # context 的干净页面继续领取，Cookie 保持共享，同时彻底终止
             # 登录页上仍在运行的 HSW 回调，避免其阻塞商品按钮点击。

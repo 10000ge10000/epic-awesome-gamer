@@ -209,6 +209,56 @@ class SecurityQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active[0], cycle_id)
         self.assertEqual(len(active[1]), 2)
 
+    async def test_unchanged_cycle_backfills_new_account(self):
+        games = [
+            {"id": "backfill-a", "title": "Game A"},
+            {"id": "backfill-b", "title": "Game B"},
+        ]
+        cycle_id, _changed = self.main.set_active_promotion_cycle(
+            self.main.DB_PATH, games
+        )
+        self.main.create_cycle_assignments(
+            self.main.DB_PATH,
+            cycle_id,
+            games,
+            start_at=1000,
+            batch_size=5,
+            batch_interval_seconds=600,
+        )
+        with self.main.connect(self.main.DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO accounts(email, credential_ciphertext, profile_id)
+                VALUES (?, 'ciphertext', ?)
+                """,
+                ("backfill@example.com", "profile-backfill"),
+            )
+
+        with (
+            patch.object(
+                self.main,
+                "_fetch_current_free_game_samples",
+                return_value=[games, games, games],
+            ),
+            patch.object(self.main, "_persist_scheduled_runs"),
+        ):
+            await self.main.refresh_promotion_cycle()
+
+        with self.main.connect(self.main.DB_PATH) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM claim_cycle_assignments WHERE cycle_id=?",
+                (cycle_id,),
+            ).fetchone()[0]
+            backfilled = conn.execute(
+                """
+                SELECT COUNT(*) FROM claim_cycle_assignments
+                WHERE cycle_id=? AND email=?
+                """,
+                (cycle_id, "backfill@example.com"),
+            ).fetchone()[0]
+        self.assertEqual(count, 2)
+        self.assertEqual(backfilled, 1)
+
     async def test_game_reporting_preserves_worker_result(self):
         email = "authoritative-result@example.com"
         run_id, _ = self.main.create_task_run(
