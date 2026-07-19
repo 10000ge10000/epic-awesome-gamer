@@ -144,7 +144,7 @@ services:
       - ENABLE_APSCHEDULER=false
       - API_PROVIDER=${API_PROVIDER:-siliconflow}
       - API_BASE_URL=${API_BASE_URL:-https://api.siliconflow.cn/v1}
-      - API_KEY_FILE=/run/secrets/captcha_nvidia_api_key
+      - API_KEY_FILE=${API_KEY_FILE:-/run/secrets/captcha_siliconflow_api_key}
       - OPENCODE_BASE_URL=https://opencode.ai/zen
       - INTERNAL_API_TOKEN_FILE=/run/secrets/internal_api_token
       - EPIC_CREDENTIAL_KEYS_FILE=/run/secrets/epic_credential_keys
@@ -179,12 +179,14 @@ services:
       - GEMINI_API_KEY=not_used
       # ============================================================
       # 模型配置（SiliconFlow 实测通过）
-      - CAPTCHA_PRIMARY_BASE_URL=${CAPTCHA_PRIMARY_BASE_URL:-https://integrate.api.nvidia.com/v1}
-      - CAPTCHA_PRIMARY_MODEL=${CAPTCHA_PRIMARY_MODEL:-meta/llama-4-maverick-17b-128e-instruct}
+      - CAPTCHA_PRIMARY_BASE_URL=${CAPTCHA_PRIMARY_BASE_URL:-https://api.siliconflow.cn/v1}
+      - CAPTCHA_PRIMARY_MODEL=${CAPTCHA_PRIMARY_MODEL:-zai-org/GLM-4.5V}
       - CAPTCHA_SECONDARY_BASE_URL=${CAPTCHA_SECONDARY_BASE_URL:-https://api.siliconflow.cn/v1}
-      - CAPTCHA_SECONDARY_MODEL=${CAPTCHA_SECONDARY_MODEL:-Qwen/Qwen3-VL-32B-Instruct}
+      - CAPTCHA_SECONDARY_MODEL=${CAPTCHA_SECONDARY_MODEL:-moonshotai/Kimi-K2.7-Code}
+      - CAPTCHA_TERTIARY_BASE_URL=${CAPTCHA_TERTIARY_BASE_URL:-https://api.siliconflow.cn/v1}
+      - CAPTCHA_TERTIARY_MODEL=${CAPTCHA_TERTIARY_MODEL:-Pro/moonshotai/Kimi-K2.6}
       - CAPTCHA_RESPONSE_MAX_TOKENS=1200
-      - CAPTCHA_TOTAL_API_BUDGET=110
+      - CAPTCHA_TOTAL_API_BUDGET=150
       # 可选：外部验证码服务商 fallback（默认关闭；Key 只放 .env）
       - CAPTCHA_PROVIDER=${CAPTCHA_PROVIDER:-none}
       - CAPTCHA_PROVIDER_API_KEY=${CAPTCHA_PROVIDER_API_KEY:-}

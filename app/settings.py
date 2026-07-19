@@ -63,6 +63,40 @@ def _read_secret(env_name: str, file_env_name: str) -> str:
     return os.getenv(env_name, "").strip()
 
 
+def _read_provider_secret(
+    base_url_env: str,
+    generic_env: str,
+    generic_file_env: str,
+) -> str:
+    """读取供应商专属 Key，并兼容旧版 NVIDIA/SiliconFlow 配置。"""
+    value = _read_secret(generic_env, generic_file_env)
+    if value:
+        return value
+
+    base_url = os.getenv(base_url_env, "").lower()
+    if "siliconflow" in base_url:
+        legacy_sources = (
+            ("CAPTCHA_SILICONFLOW_API_KEY", "CAPTCHA_SILICONFLOW_API_KEY_FILE"),
+            ("CAPTCHA_NVIDIA_API_KEY", "CAPTCHA_NVIDIA_API_KEY_FILE"),
+        )
+    elif "nvidia" in base_url:
+        legacy_sources = (
+            ("CAPTCHA_NVIDIA_API_KEY", "CAPTCHA_NVIDIA_API_KEY_FILE"),
+            ("CAPTCHA_SILICONFLOW_API_KEY", "CAPTCHA_SILICONFLOW_API_KEY_FILE"),
+        )
+    else:
+        legacy_sources = (
+            ("CAPTCHA_NVIDIA_API_KEY", "CAPTCHA_NVIDIA_API_KEY_FILE"),
+            ("CAPTCHA_SILICONFLOW_API_KEY", "CAPTCHA_SILICONFLOW_API_KEY_FILE"),
+        )
+
+    for env_name, file_env_name in legacy_sources:
+        value = _read_secret(env_name, file_env_name)
+        if value:
+            return value
+    return _read_secret("API_KEY", "API_KEY_FILE")
+
+
 def _record_provider_event(event: dict[str, Any]) -> None:
     logger.info(json.dumps(event, ensure_ascii=True, separators=(",", ":")))
     provider = str(event.get("provider", "unknown"))
@@ -157,32 +191,35 @@ class EpicSettings(AgentConfig):
     CAPTCHA_MODEL: str = Field(
         default=os.getenv(
             "CAPTCHA_PRIMARY_MODEL",
-            os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct"),
+            os.getenv("CAPTCHA_MODEL", "zai-org/GLM-4.5V"),
         ),
         description="验证码识别模型（主力）",
     )
     CAPTCHA_MODEL_FALLBACK: str = Field(
         default=os.getenv(
             "CAPTCHA_SECONDARY_MODEL",
-            os.getenv("CAPTCHA_MODEL_FALLBACK", "Qwen/Qwen3-VL-32B-Instruct"),
+            os.getenv("CAPTCHA_MODEL_FALLBACK", "moonshotai/Kimi-K2.7-Code"),
         ),
         description="验证码识别模型（备用）",
     )
 
     CAPTCHA_PRIMARY_BASE_URL: str = Field(
         default_factory=lambda: os.getenv(
-            "CAPTCHA_PRIMARY_BASE_URL", "https://integrate.api.nvidia.com/v1"
+            "CAPTCHA_PRIMARY_BASE_URL", "https://api.siliconflow.cn/v1"
         )
     )
     CAPTCHA_PRIMARY_API_KEY: SecretStr = Field(
         default_factory=lambda: SecretStr(
-            _read_secret("CAPTCHA_NVIDIA_API_KEY", "CAPTCHA_NVIDIA_API_KEY_FILE")
-            or _read_secret("API_KEY", "API_KEY_FILE")
+            _read_provider_secret(
+                "CAPTCHA_PRIMARY_BASE_URL",
+                "CAPTCHA_PRIMARY_API_KEY",
+                "CAPTCHA_PRIMARY_API_KEY_FILE",
+            )
         )
     )
     CAPTCHA_PRIMARY_MODEL: str = Field(
         default_factory=lambda: os.getenv(
-            "CAPTCHA_PRIMARY_MODEL", "meta/llama-4-maverick-17b-128e-instruct"
+            "CAPTCHA_PRIMARY_MODEL", "zai-org/GLM-4.5V"
         )
     )
     CAPTCHA_SECONDARY_BASE_URL: str = Field(
@@ -192,12 +229,35 @@ class EpicSettings(AgentConfig):
     )
     CAPTCHA_SECONDARY_API_KEY: SecretStr = Field(
         default_factory=lambda: SecretStr(
-            _read_secret("CAPTCHA_SILICONFLOW_API_KEY", "CAPTCHA_SILICONFLOW_API_KEY_FILE")
+            _read_provider_secret(
+                "CAPTCHA_SECONDARY_BASE_URL",
+                "CAPTCHA_SECONDARY_API_KEY",
+                "CAPTCHA_SECONDARY_API_KEY_FILE",
+            )
         )
     )
     CAPTCHA_SECONDARY_MODEL: str = Field(
         default_factory=lambda: os.getenv(
-            "CAPTCHA_SECONDARY_MODEL", "Qwen/Qwen3-VL-32B-Instruct"
+            "CAPTCHA_SECONDARY_MODEL", "moonshotai/Kimi-K2.7-Code"
+        )
+    )
+    CAPTCHA_TERTIARY_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv(
+            "CAPTCHA_TERTIARY_BASE_URL", "https://api.siliconflow.cn/v1"
+        )
+    )
+    CAPTCHA_TERTIARY_API_KEY: SecretStr = Field(
+        default_factory=lambda: SecretStr(
+            _read_provider_secret(
+                "CAPTCHA_TERTIARY_BASE_URL",
+                "CAPTCHA_TERTIARY_API_KEY",
+                "CAPTCHA_TERTIARY_API_KEY_FILE",
+            )
+        )
+    )
+    CAPTCHA_TERTIARY_MODEL: str = Field(
+        default_factory=lambda: os.getenv(
+            "CAPTCHA_TERTIARY_MODEL", "Pro/moonshotai/Kimi-K2.6"
         )
     )
 
@@ -214,19 +274,19 @@ class EpicSettings(AgentConfig):
     # === hcaptcha-challenger 内置模型配置（必须覆盖默认值）===
     # 这些属性会覆盖 AgentConfig 的默认 gemini 模型名称
     CHALLENGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "zai-org/GLM-4.5V")),
         description="挑战分类模型",
     )
     IMAGE_CLASSIFIER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "zai-org/GLM-4.5V")),
         description="图像分类模型 (image_label_binary)",
     )
     SPATIAL_POINT_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "zai-org/GLM-4.5V")),
         description="空间点推理模型 (image_label_area_select)",
     )
     SPATIAL_PATH_REASONER_MODEL: str = Field(
-        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "meta/llama-4-maverick-17b-128e-instruct")),
+        default=os.getenv("CAPTCHA_PRIMARY_MODEL", os.getenv("CAPTCHA_MODEL", "zai-org/GLM-4.5V")),
         description="空间路径推理模型 (image_drag_drop)",
     )
 
@@ -581,21 +641,28 @@ JSON Schema:
             if is_structured_captcha:
                 providers = [
                     (
-                        "nvidia",
+                        "primary",
                         settings.CAPTCHA_PRIMARY_BASE_URL,
                         settings.CAPTCHA_PRIMARY_API_KEY.get_secret_value(),
                         settings.CAPTCHA_PRIMARY_MODEL,
-                        45.0,
+                        60.0,
                     ),
                     (
-                        "siliconflow",
+                        "secondary",
                         settings.CAPTCHA_SECONDARY_BASE_URL,
                         settings.CAPTCHA_SECONDARY_API_KEY.get_secret_value(),
                         settings.CAPTCHA_SECONDARY_MODEL,
                         60.0,
                     ),
+                    (
+                        "tertiary",
+                        settings.CAPTCHA_TERTIARY_BASE_URL,
+                        settings.CAPTCHA_TERTIARY_API_KEY.get_secret_value(),
+                        settings.CAPTCHA_TERTIARY_MODEL,
+                        60.0,
+                    ),
                 ]
-                total_budget = float(os.getenv("CAPTCHA_TOTAL_API_BUDGET", "110"))
+                total_budget = float(os.getenv("CAPTCHA_TOTAL_API_BUDGET", "150"))
             else:
                 providers = [(API_PROVIDER, request_base_url, api_key, model, 120.0)]
                 total_budget = 120.0

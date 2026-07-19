@@ -18,7 +18,7 @@ Epic Kiosk 是一个基于 Docker 的 Epic Games 每周免费游戏自动领取�
 ## 特性
 
 - **多账号托管**：在 Web 控制台提交 Epic 邮箱和密码，后续由 Worker 自动处理登录与领取。
-- **验证码处理**：NVIDIA 主用、SiliconFlow 备用，支持会话降级、跨任务熔断和外部验证码服务商兜底。
+- **验证码处理**：默认使用 SiliconFlow 三模型链，支持会话降级、跨任务熔断和外部验证码服务商兜底。
 - **多游戏流程**：只有本周期全部周免均确认 `claimed/owned` 才会标记账号完成，失败项会延迟补跑。
 - **周期调度**：Redis 持久保存分批任务；周免集合未变化时跳过已完成账号，检测到新游戏后再调度全部账号。
 - **多 WARP 出口**：单个 `epic-warp` 容器提供 10 个内部 WARP 实例，Worker 按账号稳定分配代理出口。
@@ -28,7 +28,7 @@ Epic Kiosk 是一个基于 Docker 的 Epic Games 每周免费游戏自动领取�
 
 ### 手动部署（推荐）
 
-适合 NVIDIA、SiliconFlow 或其他 OpenAI-compatible API 提供商。
+默认推荐 SiliconFlow，也兼容 NVIDIA 和其他 OpenAI-compatible API 提供商。
 
 ```bash
 git clone https://github.com/10000ge10000/epic-kiosk.git
@@ -81,12 +81,12 @@ chmod +x install.sh
 
 ### API Provider
 
-项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。默认配置使用 NVIDIA 主供应商和 SiliconFlow 备用供应商；连接超时、429 或 5xx 会触发故障转移。
+项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。当前默认使用 SiliconFlow；连接超时、429 或 5xx 会按模型链故障转移。
 
 | Provider | API_BASE_URL | 说明 |
 | --- | --- | --- |
-| `nvidia` | `https://integrate.api.nvidia.com/v1` | 当前生产推荐，用于 hCaptcha 视觉识别。 |
-| `siliconflow` | `https://api.siliconflow.cn/v1` | 兼容部署路径，一键脚本默认引导。 |
+| `siliconflow` | `https://api.siliconflow.cn/v1` | 当前默认推荐，用于 hCaptcha 视觉识别。 |
+| `nvidia` | `https://integrate.api.nvidia.com/v1` | 兼容旧版部署配置。 |
 | `custom` | 自定义 `/v1` 地址 | 适合自建 OpenAI-compatible 网关。 |
 
 核心环境变量：
@@ -96,14 +96,29 @@ INTERNAL_API_TOKEN_PATH=/etc/epic-kiosk/secrets/internal_api_token
 EPIC_CREDENTIAL_KEYS_PATH=/etc/epic-kiosk/secrets/epic_credential_keys
 CAPTCHA_NVIDIA_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_nvidia_api_key
 CAPTCHA_SILICONFLOW_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_siliconflow_api_key
-CAPTCHA_PRIMARY_BASE_URL=https://integrate.api.nvidia.com/v1
-CAPTCHA_PRIMARY_MODEL=meta/llama-4-maverick-17b-128e-instruct
+API_PROVIDER=siliconflow
+API_BASE_URL=https://api.siliconflow.cn/v1
+CAPTCHA_PRIMARY_BASE_URL=https://api.siliconflow.cn/v1
+CAPTCHA_PRIMARY_MODEL=zai-org/GLM-4.5V
 CAPTCHA_SECONDARY_BASE_URL=https://api.siliconflow.cn/v1
-CAPTCHA_SECONDARY_MODEL=Qwen/Qwen3-VL-32B-Instruct
+CAPTCHA_SECONDARY_MODEL=moonshotai/Kimi-K2.7-Code
+CAPTCHA_TERTIARY_BASE_URL=https://api.siliconflow.cn/v1
+CAPTCHA_TERTIARY_MODEL=Pro/moonshotai/Kimi-K2.6
+CAPTCHA_TOTAL_API_BUDGET=150
 CAPTCHA_PROVIDER=none
 ```
 
 `INTERNAL_API_TOKEN` 只用于 `web` 与 `worker` 的内部接口认证，必须是独立随机值，不能与模型 API Key 共用。Secret 文件应保持 `0600`，不要把真实内容写入 `.env`。
+
+验证码模型按以下顺序故障转移：
+
+```text
+zai-org/GLM-4.5V
+  -> moonshotai/Kimi-K2.7-Code
+  -> Pro/moonshotai/Kimi-K2.6
+```
+
+三个模型均通过 SiliconFlow 的 OpenAI-compatible 接口调用。API Key 建议继续通过仓库外的 Secret 文件注入，不要写入 Git、README 或运行日志。`CAPTCHA_MODEL` 和 `CAPTCHA_MODEL_FALLBACK` 仍可用于兼容旧部署，但新部署建议使用上述 `CAPTCHA_PRIMARY_*`、`CAPTCHA_SECONDARY_*` 和 `CAPTCHA_TERTIARY_*` 配置。
 
 ### WARP 出口
 
