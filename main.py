@@ -348,6 +348,12 @@ async def read_root(request: Request):
     return templates.TemplateResponse(request, "index.html")
 
 
+@app.get("/preview/v4", response_class=HTMLResponse)
+async def read_v4_preview(request: Request):
+    """Serve the current V4 design at its explicit preview route."""
+    return templates.TemplateResponse(request, "index.html")
+
+
 @app.get("/health/live")
 async def health_live():
     return {"status": "ok"}
@@ -787,13 +793,17 @@ def _parse_current_free_games(data: dict) -> list[dict[str, str]]:
     elements = data.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
     for item in elements:
         promotions = item.get("promotions") or {}
-        is_free_now = any(
-            promo.get("discountSetting", {}).get("discountType") == "PERCENTAGE"
-            and promo.get("discountSetting", {}).get("discountPercentage") == 0
-            for group in promotions.get("promotionalOffers", [])
-            for promo in group.get("promotionalOffers", [])
+        active_offer = next(
+            (
+                promo
+                for group in promotions.get("promotionalOffers", [])
+                for promo in group.get("promotionalOffers", [])
+                if promo.get("discountSetting", {}).get("discountType") == "PERCENTAGE"
+                and promo.get("discountSetting", {}).get("discountPercentage") == 0
+            ),
+            None,
         )
-        if not is_free_now:
+        if not active_offer:
             continue
 
         image_url = next(
@@ -831,6 +841,7 @@ def _parse_current_free_games(data: dict) -> list[dict[str, str]]:
                 .get("fmtPrice", {})
                 .get("originalPrice", "免费"),
                 "description": (item.get("description") or "")[:100],
+                "promotion_end": active_offer.get("endDate", ""),
             }
         )
     unique = {game["id"].casefold(): game for game in games}

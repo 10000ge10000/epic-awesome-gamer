@@ -3,1716 +3,310 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#121416">
     <title>Epic 自动驾驶</title>
-    <!-- Favicon - 多尺寸支持 -->
     <link rel="icon" type="image/png" sizes="32x32" href="https://static-assets-prod.unrealengine.com/account-portal/static/epic-favicon-96x96.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="https://static-assets-prod.unrealengine.com/account-portal/static/epic-favicon-96x96.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="https://static-assets-prod.unrealengine.com/account-portal/static/epic_logo.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>if (location.pathname === '/' || location.pathname === '/preview/v4') document.documentElement.classList.add('design-v4');</script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { height: 100%; }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #0f172a;
-            color: #e2e8f0;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            overflow-x: hidden;
-        }
-
-        #particles-canvas {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        .content-wrapper {
-            position: relative;
-            z-index: 1;
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            width: 100%;
-        }
-
-        .glass-panel {
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-        }
-
-        .game-card:hover {
-            transform: translateY(-5px) scale(1.03);
-            box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
-            border-color: rgba(96, 165, 250, 0.6);
-            transition: all 0.3s;
-        }
-
-        .terminal {
-            font-family: 'JetBrains Mono', monospace;
-            background: #000;
-            border: 1px solid #333;
-        }
-        .terminal-text {
-            color: #4ade80;
-            text-shadow: 0 0 5px rgba(74, 222, 128, 0.5);
-        }
-
-        .fade-in { animation: fadeIn 0.4s ease-out forwards; opacity: 0; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-
-        .modal-enter { animation: modalIn 0.25s ease-out forwards; }
-        @keyframes modalIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
-
-        #toast-container {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            z-index: 9999;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        .toast {
-            padding: 14px 20px;
-            border-radius: 12px;
-            font-size: 14px;
-            font-weight: 500;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-            animation: toastIn 0.25s ease-out forwards;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            max-width: 360px;
-        }
-
-        @keyframes toastIn { from { opacity: 0; transform: translateX(80px); } to { opacity: 1; transform: translateX(0); } }
-        .toast.hiding { animation: toastOut 0.25s ease-out forwards; }
-        @keyframes toastOut { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(80px); } }
-        .toast-success { background: linear-gradient(135deg, #059669, #10b981); color: white; }
-        .toast-error { background: linear-gradient(135deg, #dc2626, #ef4444); color: white; }
-        .toast-warning { background: linear-gradient(135deg, #d97706, #f59e0b); color: white; }
-        .toast-info { background: linear-gradient(135deg, #2563eb, #3b82f6); color: white; }
-
-        .skeleton {
-            background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
-            background-size: 200% 100%;
-            animation: shimmer 1.5s infinite;
-            border-radius: 8px;
-        }
-        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-
-        /* 统计卡片 - 更紧凑的横向布局 */
-        .stats-bar {
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        .stat-item {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-            padding: 1rem 1.5rem;
-            background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(139, 92, 246, 0.08));
-            border: 1px solid rgba(59, 130, 246, 0.15);
-            border-radius: 14px;
-            transition: all 0.2s;
-        }
-        .stat-item:hover { border-color: rgba(59, 130, 246, 0.3); transform: translateY(-2px); }
-        .stat-icon {
-            width: 44px;
-            height: 44px;
-            border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .stat-label { font-size: 14px; color: #94a3b8; white-space: nowrap; }
-        .stat-value { font-size: 24px; font-weight: 700; }
-
-        .announcement-bar {
-            background: linear-gradient(90deg, rgba(59, 130, 246, 0.15), rgba(139, 92, 246, 0.15));
-            border-bottom: 1px solid rgba(59, 130, 246, 0.2);
-        }
-
-        .free-game-card {
-            position: relative;
-            overflow: hidden;
-            transition: all 0.3s;
-        }
-        .free-game-card:hover {
-            transform: translateY(-8px);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
-        }
-        .free-game-card::before {
-            content: 'FREE';
-            position: absolute;
-            top: 12px;
-            right: -28px;
-            background: linear-gradient(135deg, #059669, #10b981);
-            color: white;
-            font-size: 11px;
-            font-weight: bold;
-            padding: 4px 32px;
-            transform: rotate(45deg);
-            z-index: 10;
-            box-shadow: 0 2px 10px rgba(16, 185, 129, 0.5);
-        }
-
-        .custom-checkbox {
-            appearance: none;
-            width: 18px;
-            height: 18px;
-            border: 2px solid #475569;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .custom-checkbox:checked {
-            background: #3b82f6;
-            border-color: #3b82f6;
-            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3E%3C/svg%3E");
-        }
-
-        .main-content {
-            flex: 1;
-            width: 100%;
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 0 2rem;
-            display: flex;
-            flex-direction: column;
-        }
-        .tab-content { width: 100%; }
-
-        /* ===== PC 端：工作区居中布局 (≥768px) ===== */
-        @media (min-width: 768px) {
-            .tab-content-centered {
-                flex: 1;
-                width: 100%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-        }
-
-        /* ===== 移动端：正常滚动流 (<768px) ===== */
-        @media (max-width: 767px) {
-            .main-content {
-                padding: 0 1rem;
-            }
-            .tab-content-centered {
-                width: 100%;
-                padding: 1rem 0;
-            }
-            .work-area-container {
-                flex-direction: column !important;
-                align-items: stretch !important;
-                justify-content: flex-start !important;
-                gap: 1rem !important;
-            }
-            .work-panel-wrapper {
-                width: 100% !important;
-            }
-            .work-panel {
-                width: 100% !important;
-                max-width: 100% !important;
-                padding: 1.5rem !important;
-            }
-            /* 移动端日志面板：默认隐藏，使用 max-height 控制 */
-            .status-panel-wrapper {
-                transform: translateY(20px) !important;
-                width: 100% !important;
-                max-height: 0 !important;
-                opacity: 0 !important;
-                overflow: hidden !important;
-            }
-            .status-panel-wrapper.is-visible {
-                transform: translateY(0) !important;
-                width: 100% !important;
-                max-height: 500px !important;
-                opacity: 1 !important;
-            }
-            .status-panel {
-                width: 100% !important;
-                max-width: 100% !important;
-                max-height: 40vh !important;
-            }
-            .stat-item {
-                padding: 0.75rem 1rem;
-            }
-            .stat-icon {
-                width: 36px;
-                height: 36px;
-            }
-            .stat-value {
-                font-size: 18px;
-            }
-            footer {
-                display: none;
-            }
-        }
-
-        /* 其他 tab 支持滚动 */
-        .tab-content-scroll {
-            flex: 1;
-            width: 100%;
-            overflow-y: auto;
-            padding-bottom: 1rem;
-        }
-
-        /* ===== 工作区动态布局 ===== */
-        .work-area-container {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            gap: 0;
-            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .work-area-container.is-working {
-            justify-content: space-between;
-            gap: 2rem;
-        }
-
-        /* 工作面板 */
-        .work-panel-wrapper {
-            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .work-panel {
-            padding: 2.5rem;
-            border-radius: 20px;
-            width: 480px;
-            max-width: 90vw;
-        }
-        .work-area-container.is-working .work-panel-wrapper {
-            flex-shrink: 0;
-        }
-
-        /* 系统日志面板（独立，工作中显示在右侧） */
-        .status-panel-wrapper {
-            opacity: 0;
-            transform: translateX(50px);
-            width: 0;
-            overflow: hidden;
-            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .status-panel-wrapper.is-visible {
-            opacity: 1;
-            transform: translateX(0);
-            width: 480px;
-            flex-shrink: 0;
-        }
-        .status-panel {
-            padding: 1.5rem;
-            border-radius: 20px;
-            width: 480px;
-            max-width: 90vw;
-            max-height: 70vh;
-        }
-
-        /* 游戏卡片网格 - 更大的封面 */
-        .games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1.5rem; width: 100%; }
-        .free-games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 2rem; width: 100%; max-width: 1100px; margin: 0 auto; }
-
-        .work-input {
-            padding: 1rem 1.25rem;
-            border-radius: 12px;
-            font-size: 16px;
-        }
-        .work-btn {
-            padding: 1rem 1.5rem;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-        }
-
-        /* Tab 按钮 - 更大更醒目 */
-        .tab-btn {
-            padding: 0.75rem 1.5rem;
-            border-radius: 50px;
-            font-size: 14px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        .tab-btn-active {
-            background: linear-gradient(135deg, #3b82f6, #2563eb);
-            color: white;
-            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
-        }
-        .tab-btn-inactive {
-            color: #94a3b8;
-        }
-        .tab-btn-inactive:hover {
-            color: white;
-            background: rgba(255, 255, 255, 0.1);
-        }
-
-        /* 底部图标放大 */
-        .footer-icon {
-            width: 28px;
-            height: 28px;
-            transition: all 0.2s;
-        }
-        .footer-icon:hover {
-            transform: scale(1.2);
-        }
-
-        /* Tailwind CSS 加载前的 SVG 尺寸预设，防止闪烁 */
-        svg.w-4.h-4 { width: 16px !important; height: 16px !important; }
-        svg.w-6.h-6 { width: 24px !important; height: 24px !important; }
-        svg.w-7.h-7 { width: 28px !important; height: 28px !important; }
-        svg.w-8.h-8 { width: 32px !important; height: 32px !important; }
-        .w-12.h-12 { width: 48px !important; height: 48px !important; }
-        .stat-icon { width: 44px !important; height: 44px !important; }
-
-        /* 页面加载遮罩 - 防止内容闪烁 */
-        #page-loader {
-            position: fixed;
-            inset: 0;
-            background: #0f172a;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 99999;
-            transition: opacity 0.3s ease-out;
-        }
-        #page-loader.fade-out {
-            opacity: 0;
-            pointer-events: none;
-        }
-        #page-loader .spinner {
-            width: 40px;
-            height: 40px;
-            border: 3px solid rgba(59, 130, 246, 0.3);
-            border-top-color: #3b82f6;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* ===== 2026 控制台视觉重构 ===== */
         :root {
-            --page: #f6f8fb;
-            --surface: #ffffff;
-            --surface-muted: #f9fafb;
-            --text: #172033;
-            --text-secondary: #667085;
-            --border: #e4e7ec;
-            --border-strong: #d0d5dd;
-            --primary: #2563eb;
-            --primary-hover: #1d4ed8;
-            --success: #168a5b;
-            --warning: #b7791f;
-            --danger: #c2413b;
+            --ink: #121416; --ink-raised: #191C1F; --ink-soft: #22262A; --ink-deep: #090A0B;
+            --paper: #EFEDE7; --paper-soft: #DAD6CC; --line: #343A3F; --line-light: #C5C0B5;
+            --text: #F4F1EA; --muted: #A4A9A7; --dim: #707774; --dark-text: #17191B;
+            --blue: #5C8CFF; --blue-dark: #3467D8; --lime: #A9E14B; --green: #3CCF7D; --amber: #F4B64B; --red: #F06D6D;
+            --r-sm: 8px; --r-md: 14px; --r-lg: 22px; --r-xl: 30px;
+            --font-ui: Manrope, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+            --font-mono: "DM Mono", "JetBrains Mono", ui-monospace, monospace;
         }
-
-        body {
-            background: var(--page);
-            color: var(--text);
-            overflow-x: hidden;
-        }
-
-        #particles-canvas { display: none; }
-        #page-loader { background: var(--page); }
-        #page-loader .spinner {
-            border-color: #dbeafe;
-            border-top-color: var(--primary);
-        }
-
-        .content-wrapper {
-            max-width: 1280px;
-            margin: 0 auto;
-            padding: 24px 32px 32px;
-        }
-
-        .announcement-bar {
-            background: #eff6ff;
-            border-bottom: 1px solid #bfdbfe;
-            color: #334155;
-        }
-
-        .announcement-bar .text-blue-200 { color: #334155 !important; }
-        .announcement-bar .text-blue-400 { color: var(--primary) !important; }
-
-        .glass-panel {
-            background: var(--surface);
-            backdrop-filter: none;
-            border: 1px solid var(--border);
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-        }
-
-        .main-content {
-            max-width: none;
-            padding: 0;
-            display: block;
-        }
-
-        .tab-content-centered {
-            display: block;
-            width: 100%;
-        }
-
-        .app-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 24px;
-            margin-bottom: 24px;
-        }
-
-        .brand-mark {
-            width: 42px;
-            height: 42px;
-            border-radius: 8px;
-            background: var(--primary);
-            box-shadow: none;
-        }
-
-        .brand-title { color: var(--text); }
-        .brand-subtitle {
-            color: var(--text-secondary);
-            font-family: Inter, sans-serif;
-            text-transform: none;
-            letter-spacing: 0;
-        }
-
-        .app-nav {
-            padding: 4px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: var(--surface);
-            box-shadow: none;
-        }
-
-        .tab-btn {
-            min-height: 40px;
-            padding: 9px 16px;
-            border-radius: 6px;
-            letter-spacing: 0;
-        }
-
-        .tab-btn-active {
-            background: var(--primary);
-            box-shadow: none;
-        }
-
-        .tab-btn-inactive { color: var(--text-secondary); }
-        .tab-btn-inactive:hover {
-            color: var(--text);
-            background: #f2f4f7;
-        }
-
-        .dashboard-intro {
-            margin-bottom: 20px;
-        }
-
-        .dashboard-intro h2 {
-            color: var(--text);
-            font-size: 26px;
-            line-height: 1.25;
-            font-weight: 700;
-        }
-
-        .dashboard-intro p {
-            margin-top: 7px;
-            color: var(--text-secondary);
-            font-size: 14px;
-        }
-
-        .work-area-container,
-        .work-area-container.is-working {
-            display: grid;
-            grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr);
-            align-items: start;
-            justify-content: stretch;
-            gap: 20px;
-        }
-
-        .work-panel-wrapper,
-        .work-area-container.is-working .work-panel-wrapper {
-            width: auto;
-            min-width: 0;
-        }
-
-        .work-panel {
-            width: 100%;
-            max-width: none;
-            min-height: 100%;
-            padding: 24px;
-            border-radius: 8px;
-        }
-
-        .work-panel-title {
-            margin-bottom: 4px;
-            color: var(--text);
-            font-size: 20px;
-            text-align: left;
-        }
-
-        .work-panel-description {
-            margin-bottom: 20px;
-            color: var(--text-secondary);
-            font-size: 13px;
-        }
-
-        .account-notice {
-            margin-bottom: 20px;
-            padding: 12px 14px;
-            border: 1px solid #bfdbfe;
-            border-radius: 6px;
-            background: #eff6ff;
-            color: #334155;
-        }
-
-        .account-notice a { color: var(--primary) !important; }
-        .form-label {
-            display: block;
-            margin-bottom: 7px;
-            color: #344054;
-            font-size: 13px;
-            font-weight: 600;
-        }
-
-        .work-input {
-            padding: 13px 14px;
-            border-radius: 6px;
-            border-color: var(--border-strong) !important;
-            background: var(--surface) !important;
-            color: var(--text) !important;
-        }
-
-        .work-input::placeholder { color: #98a2b3; }
-        .work-input:focus {
-            border-color: var(--primary) !important;
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
-        }
-
-        .custom-checkbox {
-            border-color: #98a2b3;
-            background-color: var(--surface);
-        }
-
-        .work-btn {
-            min-height: 50px;
-            padding: 13px 18px;
-            border-radius: 6px;
-        }
-
-        #btn-deposit {
-            background: var(--primary);
-            box-shadow: none;
-        }
-
-        #btn-deposit:hover { background: var(--primary-hover); }
-
-        #btn-delete {
-            width: auto;
-            padding: 6px 0;
-            border: 0;
-            border-radius: 0;
-            color: var(--danger);
-            font-size: 13px;
-            text-align: left;
-        }
-
-        #btn-delete:hover {
-            background: transparent;
-            color: #991b1b;
-            text-decoration: underline;
-        }
-
-        .status-panel-wrapper,
-        .status-panel-wrapper.is-visible {
-            width: auto;
-            min-width: 0;
-            opacity: 1;
-            transform: none;
-            overflow: visible;
-        }
-
-        .status-panel {
-            width: 100%;
-            max-width: none;
-            max-height: none;
-            padding: 24px;
-            border-radius: 8px;
-        }
-
-        .task-summary {
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .task-summary h3 {
-            color: var(--text);
-            font-size: 20px;
-            font-weight: 700;
-        }
-
-        .task-summary p {
-            margin-top: 4px;
-            color: var(--text-secondary);
-            font-size: 13px;
-        }
-
-        .task-steps {
-            display: grid;
-            gap: 10px;
-            margin: 16px 0;
-        }
-
-        .task-step {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            color: #344054;
-            font-size: 13px;
-            font-weight: 600;
-        }
-
-        .task-step-index {
-            display: inline-flex;
-            width: 24px;
-            height: 24px;
-            align-items: center;
-            justify-content: center;
-            border-radius: 50%;
-            background: #f2f4f7;
-            color: var(--text-secondary);
-            font-size: 12px;
-        }
-
-        .terminal {
-            min-height: 180px;
-            max-height: 280px;
-            border: 0;
-            border-radius: 6px;
-            background: #111827;
-        }
-
-        .terminal-text {
-            color: #d1d5db;
-            text-shadow: none;
-        }
-
-        .status-panel .text-slate-400 { color: var(--text-secondary) !important; }
-        .status-panel .text-slate-600 { color: #98a2b3 !important; }
-
-        .stats-section {
-            margin: 0 0 28px;
-        }
-
-        .section-heading {
-            margin-bottom: 12px;
-            color: var(--text);
-            font-size: 18px;
-            font-weight: 700;
-        }
-
-        .stats-bar {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 12px;
-        }
-
-        .stat-item {
-            min-width: 0;
-            padding: 16px 18px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: var(--surface);
-            box-shadow: none;
-        }
-
-        .stat-item:hover {
-            border-color: var(--border-strong);
-            transform: none;
-        }
-
-        .stat-icon {
-            width: 38px !important;
-            height: 38px !important;
-            border-radius: 6px;
-        }
-
-        .stat-label { color: var(--text-secondary); }
-        .stat-value { color: var(--text) !important; }
-
-        .tab-content-scroll { overflow: visible; }
-        .query-shell,
-        .free-games-shell {
-            padding: 24px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: var(--surface);
-        }
-
-        .query-toolbar {
-            max-width: none;
-            margin: 0 0 24px;
-            padding: 0;
-            border: 0;
-            background: transparent;
-            box-shadow: none;
-        }
-
-        .query-toolbar input {
-            min-width: 0;
-            border: 1px solid var(--border-strong) !important;
-            border-radius: 6px 0 0 6px;
-            color: var(--text) !important;
-        }
-
-        #btn-query {
-            flex: 0 0 auto;
-            min-width: 84px;
-            border-radius: 0 6px 6px 0;
-            background: #344054;
-            white-space: nowrap;
-        }
-
-        .games-grid {
-            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-            gap: 16px;
-            max-width: none;
-        }
-
-        .game-card {
-            border-color: var(--border) !important;
-            border-radius: 8px;
-            background: #1f2937 !important;
-        }
-
-        .game-card:hover {
-            transform: translateY(-2px);
-            border-color: #93c5fd !important;
-            box-shadow: 0 8px 20px rgba(16, 24, 40, 0.12);
-        }
-
-        .free-games-grid {
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 16px;
-            max-width: none;
-        }
-
-        .free-game-card {
-            border-radius: 8px !important;
-            background: var(--surface);
-        }
-
-        .free-game-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(16, 24, 40, 0.12);
-        }
-
-        .free-game-card h4 { color: var(--text) !important; }
-        .free-game-card::before { display: none; }
-
-        .modal-card {
-            border-radius: 8px !important;
-            border-color: var(--border) !important;
-            background: var(--surface) !important;
-            color: var(--text);
-        }
-
-        .modal-card h3 { color: var(--text) !important; }
-        .modal-card .text-slate-400,
-        .modal-card .text-slate-300 { color: var(--text-secondary) !important; }
-        .modal-card .bg-slate-800 { background: var(--surface-muted) !important; }
-
-        #toast-container { top: 16px; right: 16px; }
-        .toast {
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: var(--surface);
-            color: var(--text);
-            box-shadow: 0 8px 24px rgba(16, 24, 40, 0.14);
-        }
-
-        .toast-success { border-left: 4px solid var(--success); }
-        .toast-error { border-left: 4px solid var(--danger); }
-        .toast-warning { border-left: 4px solid var(--warning); }
-        .toast-info { border-left: 4px solid var(--primary); }
-
-        footer {
-            margin-top: 32px !important;
-            border-color: var(--border) !important;
-        }
-
-        footer a { color: var(--text-secondary) !important; }
-
-        @media (max-width: 767px) {
-            .content-wrapper {
-                padding: 16px;
-            }
-
-            .app-header { order: 1; }
-            .main-content { order: 2; }
-            .stats-section {
-                order: 3;
-                margin: 24px 0 0;
-            }
-            .stats-section-title { display: block !important; }
-            footer { order: 4; }
-
-            .announcement-bar {
-                padding: 9px 40px 9px 12px !important;
-                text-align: left;
-            }
-
-            .announcement-bar span:first-child { display: none; }
-            .app-header {
-                align-items: stretch;
-                margin-bottom: 20px;
-            }
-
-            .app-header { flex-direction: column; }
-
-            .brand-row {
-                flex-direction: row !important;
-                align-items: center !important;
-                gap: 10px !important;
-            }
-
-            .brand-mark {
-                width: 38px;
-                height: 38px;
-            }
-            .app-nav {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                width: 100%;
-            }
-
-            .tab-btn {
-                width: 100%;
-                min-width: 0;
-                padding: 9px 7px;
-            }
-
-            .dashboard-intro { margin-bottom: 14px; }
-            .dashboard-intro h2 { font-size: 22px; }
-            .dashboard-intro p { margin-top: 4px; }
-
-            .work-area-container,
-            .work-area-container.is-working {
-                display: flex;
-                flex-direction: column !important;
-                gap: 16px !important;
-            }
-
-            .work-panel,
-            .status-panel {
-                padding: 16px !important;
-                border-radius: 8px;
-            }
-
-            .work-panel-description,
-            .account-notice { margin-bottom: 14px; }
-            .account-notice { padding: 10px 12px; }
-            #deposit-form > :not([hidden]) ~ :not([hidden]) { margin-top: 14px; }
-
-            .status-panel-wrapper,
-            .status-panel-wrapper.is-visible {
-                width: 100% !important;
-                max-height: none !important;
-                opacity: 1 !important;
-                transform: none !important;
-                overflow: visible !important;
-            }
-
-            .status-panel { max-height: none !important; }
-            .terminal { min-height: 150px; max-height: 220px; }
-
-            .stats-bar {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 10px;
-            }
-
-            .stat-item {
-                padding: 13px;
-                gap: 10px;
-            }
-
-            .stat-icon {
-                width: 34px !important;
-                height: 34px !important;
-            }
-
-            .stat-value { font-size: 19px; }
-            .query-shell,
-            .free-games-shell { padding: 16px; }
-
-            .query-toolbar {
-                display: grid !important;
-                grid-template-columns: minmax(0, 1fr) 76px;
-                gap: 0 !important;
-            }
-
-            .query-toolbar input { width: 100%; }
-            #btn-query {
-                width: 76px;
-                min-width: 76px;
-                padding: 0 12px;
-            }
-
-            .free-games-grid { grid-template-columns: 1fr; }
-            .games-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-            footer { display: none; }
-        }
+        * { box-sizing: border-box; }
+        html { background: var(--ink-deep); scroll-behavior: smooth; }
+        body { min-width: 320px; min-height: 100vh; margin: 0; overflow-x: hidden; color: var(--text); background: var(--ink); font: 15px/1.55 var(--font-ui); }
+        button, input { font: inherit; } button { cursor: pointer; } button:disabled { cursor: not-allowed; } a { color: inherit; }
+        .hidden { display: none !important; } .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+        .skip-link { position:fixed; left:16px; top:14px; z-index:300; padding:10px 14px; background:var(--paper); color:var(--dark-text); transform:translateY(-160%); border-radius:var(--r-sm); font-weight:800; }
+        .skip-link:focus { transform:translateY(0); }
+        :focus-visible { outline: 3px solid #BFD1FF; outline-offset: 3px; }
+
+        #page-loader { position:fixed; inset:0; z-index:500; display:grid; place-items:center; background:var(--ink-deep); transition:opacity .2s ease, visibility .2s ease; }
+        #page-loader.fade-out { opacity:0; visibility:hidden; pointer-events:none; }
+        .loader-mark { display:inline-grid; place-items:center; width:34px; height:34px; border:2px solid #59616A; border-top-color:var(--blue); border-radius:50%; animation:spin .75s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+
+        .notice { position:relative; z-index:20; display:flex; justify-content:center; align-items:center; min-height:36px; padding:7px 58px 7px 16px; background:#D9E4FF; color:#23324C; font-size:12px; font-weight:700; letter-spacing:.01em; }
+        .notice-inner { display:flex; gap:8px; align-items:center; text-align:center; } .notice svg { width:15px; height:15px; flex:0 0 auto; } .notice a { color:#1F4EAD; text-underline-offset:3px; }
+        .notice-close { position:absolute; right:8px; top:50%; display:grid; place-items:center; width:44px; height:36px; border:0; color:#23324C; background:transparent; transform:translateY(-50%); font-size:20px; }
+        .notice.is-closing { opacity:0; transform:translateY(-100%); transition:opacity .18s ease, transform .18s ease; }
+
+        .site { width:min(1480px, 100%); margin:0 auto; padding:0 32px 48px; }
+        .masthead { display:grid; grid-template-columns:1fr auto 1fr; gap:24px; align-items:center; min-height:94px; border-bottom:1px solid var(--line); }
+        .brand { display:flex; align-items:center; min-width:0; gap:12px; text-decoration:none; }
+        .brand-mark { display:grid; place-items:center; width:42px; height:42px; flex:0 0 auto; border:1px solid #7387B0; border-radius:13px; background:#283247; color:#F8FBFF; }
+        .brand-mark svg { width:22px; height:22px; } .brand-name { margin:0; color:var(--text); font-size:17px; font-weight:800; letter-spacing:-.03em; } .brand-subtitle { margin:1px 0 0; color:var(--muted); font-size:12px; }
+        .nav-tabs { display:flex; align-items:center; padding:4px; border:1px solid var(--line); border-radius:999px; background:var(--ink-deep); }
+        .tab-btn { min-height:40px; padding:0 17px; border:0; border-radius:999px; color:var(--muted); background:transparent; font-size:13px; font-weight:800; transition:background .18s ease, color .18s ease, transform .18s ease; }
+        .tab-btn:hover { color:var(--text); } .tab-btn:active { transform:scale(.97); } .tab-btn-active { color:#162039; background:#DCE7FF; } .tab-btn-active:hover { color:#162039; }
+        .header-utility { display:flex; justify-content:flex-end; gap:16px; align-items:center; font-family:var(--font-mono); font-size:11px; letter-spacing:.03em; }
+        .service-state { display:flex; gap:7px; align-items:center; color:#C4C9C7; white-space:nowrap; } .state-dot { width:8px; height:8px; flex:0 0 auto; border-radius:50%; background:var(--green); box-shadow:0 0 0 4px rgb(60 207 125 / .1); } .is-unavailable .state-dot { background:var(--red); box-shadow:none; } .is-checking .state-dot { background:var(--amber); box-shadow:none; }
+
+        .system-rail { display:grid; grid-template-columns:1.6fr repeat(3, 1fr); border-bottom:1px solid var(--line); }
+        .rail-item { min-height:86px; padding:16px 18px; border-right:1px solid var(--line); display:flex; align-items:center; gap:13px; }
+        .rail-item:last-child { border-right:0; } .rail-index { color:var(--dim); font:11px var(--font-mono); align-self:flex-start; } .rail-label { margin:0 0 2px; color:var(--muted); font-size:12px; font-weight:700; } .rail-value { margin:0; color:var(--text); font:700 25px/1 var(--font-mono); letter-spacing:-.06em; } .rail-caption { margin-left:auto; color:var(--dim); font:11px var(--font-mono); }
+        .rail-feature { background:var(--paper); color:var(--dark-text); } .rail-feature .rail-label, .rail-feature .rail-caption { color:#62645E; } .rail-feature .rail-value { color:var(--dark-text); }
+
+        main { padding-top:48px; } .view-lead { display:grid; grid-template-columns:minmax(0, 1fr) 300px; gap:36px; align-items:end; margin-bottom:26px; }
+        .eyebrow { margin:0 0 10px; color:var(--blue); font:11px var(--font-mono); letter-spacing:.12em; text-transform:uppercase; } .view-lead h2 { max-width:780px; margin:0; color:var(--text); font-size:clamp(32px, 4vw, 58px); line-height:1.03; letter-spacing:-.065em; } .view-lead p:not(.eyebrow) { max-width:520px; margin:14px 0 0; color:var(--muted); font-size:15px; }
+        .lead-note { padding:16px 0 0 18px; border-left:2px solid var(--lime); color:#D2D8D4; font-size:13px; } .lead-note strong { display:block; margin-bottom:4px; color:var(--lime); font:11px var(--font-mono); letter-spacing:.08em; }
+
+        .mission-stage { display:grid; grid-template-columns:minmax(0, 2fr) minmax(300px, 1fr); border:1px solid var(--line); border-radius:var(--r-xl); overflow:hidden; background:var(--ink-raised); }
+        .passport { position:relative; min-height:620px; padding:34px; color:var(--dark-text); background:var(--paper); }
+        .passport-top { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; padding-bottom:24px; border-bottom:1px solid var(--line-light); }
+        .passport-kicker { margin:0 0 8px; color:#536179; font:11px var(--font-mono); letter-spacing:.1em; } .passport h3 { margin:0; font-size:26px; line-height:1.15; letter-spacing:-.05em; } .passport-copy { max-width:560px; margin:7px 0 0; color:#5F605B; font-size:13px; }
+        .passport-stamp { display:flex; align-items:center; gap:7px; padding:7px 10px; color:#254B9B; border:1px solid #A9BDE9; border-radius:999px; font:10px var(--font-mono); white-space:nowrap; } .passport-stamp .state-dot { width:6px; height:6px; box-shadow:none; }
+        .security-note { display:grid; grid-template-columns:22px 1fr; gap:10px; margin:24px 0; padding:15px 16px; border-left:3px solid var(--blue-dark); background:#E2E6EA; }
+        .security-note svg { width:20px; height:20px; color:#365279; } .security-note h4 { margin:0 0 6px; color:#343B43; font-size:12px; } .security-note ul { display:grid; gap:5px; margin:0; padding:0; list-style:none; color:#545960; font-size:12px; } .security-note li { padding-left:9px; border-left:1px solid #8FA4CA; } .security-note a { color:#214D9E; font-weight:800; text-underline-offset:2px; }
+        .account-form { display:grid; gap:17px; max-width:680px; padding-bottom:78px; } .field-group { min-width:0; } .field-label { display:block; margin:0 0 7px; color:inherit; font-size:12px; font-weight:800; } .field-input { width:100%; min-height:52px; padding:0 15px; color:var(--dark-text); border:1px solid #A7A69E; border-radius:var(--r-sm); outline:0; background:#F8F7F3; font-size:16px; transition:border-color .18s ease, box-shadow .18s ease; } .field-input::placeholder { color:#8B8E8C; } .field-input:hover { border-color:#6F7474; } .field-input:focus { border-color:var(--blue-dark); box-shadow:0 0 0 3px rgb(52 103 216 / .17); }
+        .password-field { position:relative; } .password-field .field-input { padding-right:54px; } .password-toggle { position:absolute; right:1px; top:1px; display:grid; place-items:center; width:50px; height:50px; border:0; color:#4D5A70; background:transparent; } .password-toggle svg { width:19px; height:19px; } .field-hint { display:block; margin-top:6px; color:#6B6F6D; font-size:11px; }
+        .form-options { display:flex; gap:9px; align-items:center; color:#505553; font-size:13px; } .custom-checkbox { width:18px; height:18px; margin:0; accent-color:var(--blue-dark); } .button-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:4px; }
+        .btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:48px; padding:0 17px; border:1px solid transparent; border-radius:var(--r-sm); text-decoration:none; font-size:13px; font-weight:800; transition:transform .16s ease, background .16s ease, border-color .16s ease, opacity .16s ease; } .btn svg { width:18px; height:18px; } .btn:hover { transform:translateY(-1px); } .btn:active { transform:translateY(0); } .btn:disabled { opacity:.5; transform:none; } .btn-primary { color:#F5F7FF; background:var(--blue-dark); } .btn-primary:hover { background:#2D58B8; } .btn-secondary { color:var(--text); border-color:#5A626A; background:transparent; } .btn-secondary:hover { border-color:#99A4B1; background:#24282C; } .passport .btn-secondary { color:#33363A; border-color:#9D9D95; } .passport .btn-secondary:hover { background:#DEDAD0; }
+
+        .task-deck { position:relative; display:flex; flex-direction:column; min-width:0; padding:34px 28px 28px; background:var(--ink-raised); }
+        .task-deck::before { content:""; position:absolute; inset:0 0 auto; height:5px; background:var(--blue); } .task-kicker { margin:0 0 9px; color:var(--blue); font:11px var(--font-mono); letter-spacing:.1em; } .task-deck h3 { margin:0; font-size:22px; letter-spacing:-.045em; } #task-summary-text { min-height:44px; margin:8px 0 0; color:var(--muted); font-size:13px; }
+        .task-steps { display:grid; gap:0; margin:32px 0 26px; border-top:1px solid var(--line); } .task-step { display:grid; grid-template-columns:30px 1fr; gap:10px; align-items:center; min-height:58px; color:#777E82; border-bottom:1px solid var(--line); font-size:13px; font-weight:700; transition:color .18s ease, background .18s ease; } .task-step-index { display:grid; place-items:center; width:22px; height:22px; border:1px solid #555D63; border-radius:50%; color:#8D9598; font:10px var(--font-mono); } .task-step.is-active { color:var(--text); background:#20252B; } .task-step.is-active .task-step-index { color:#17223B; border-color:var(--blue); background:var(--blue); } .task-step.is-complete { color:#C7D5CB; } .task-step.is-complete .task-step-index { color:#0D2418; border-color:var(--green); background:var(--green); }
+        .terminal-toolbar { display:flex; align-items:center; justify-content:space-between; margin-top:auto; margin-bottom:9px; color:#AEB5B2; font-size:11px; } .terminal-title { display:flex; gap:7px; align-items:center; font-family:var(--font-mono); } .clear-log { min-height:36px; padding:0 9px; border:0; color:#AEB5B2; background:transparent; font-size:11px; text-decoration:underline; text-underline-offset:3px; } .terminal { min-height:166px; max-height:260px; overflow:auto; padding:15px; border:1px solid #30363B; border-radius:var(--r-md); background:var(--ink-deep); } .terminal-text { margin:0; color:#C0CEBF; white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.7 var(--font-mono); }
+
+        .library-shell, .drops-shell { border-top:1px solid var(--line); padding-top:28px; } .query-dock { display:grid; grid-template-columns:1.25fr 1.25fr auto; gap:12px; align-items:end; padding:18px; border:1px solid var(--line); border-radius:var(--r-lg); background:#202428; } .query-dock .field-label { color:#C7CCCA; } .query-dock .field-input { color:var(--text); border-color:#50575D; background:#121416; } .query-dock .field-input::placeholder { color:#717A80; } .query-dock .btn { min-width:130px; }
+        .result-header { display:flex; justify-content:space-between; align-items:center; margin:34px 0 14px; } .result-header h3 { margin:0; font-size:16px; letter-spacing:-.02em; } .count-badge { padding:3px 8px; color:#1F250E; border-radius:999px; background:var(--lime); font:11px var(--font-mono); }
+        .games-grid { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:14px; } .game-card, .free-game-card { display:block; min-width:0; overflow:hidden; color:var(--text); border:1px solid var(--line); border-radius:var(--r-md); background:var(--ink-raised); text-decoration:none; transition:transform .18s ease, border-color .18s ease; } .game-card:hover, .free-game-card:hover { transform:translateY(-3px); border-color:#7695D9; } .game-cover, .free-cover { aspect-ratio:3 / 4; overflow:hidden; background:#252A2E; } .game-cover img, .free-cover img { display:block; width:100%; height:100%; object-fit:cover; } .game-info { padding:12px; } .game-name { display:-webkit-box; overflow:hidden; margin:0; -webkit-box-orient:vertical; -webkit-line-clamp:2; color:var(--text); font-size:13px; line-height:1.35; } .game-meta { display:flex; align-items:center; gap:6px; margin-top:8px; color:var(--muted); font:10px var(--font-mono); } .game-meta .state-dot { width:6px; height:6px; box-shadow:none; }
+        .free-games-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:18px; } .free-game-card { border-radius:var(--r-lg); background:var(--ink-deep); } .free-cover { aspect-ratio:16 / 9; } .free-game-card .game-info { padding:16px; border-top:3px solid var(--blue); } .free-badge { display:inline-block; margin-bottom:8px; padding:4px 7px; color:#183414; border-radius:999px; background:var(--lime); font:10px var(--font-mono); letter-spacing:.04em; } .free-description { display:-webkit-box; overflow:hidden; margin:8px 0 0; -webkit-box-orient:vertical; -webkit-line-clamp:2; color:var(--muted); font-size:12px; }
+        .cover-fallback { display:grid; place-items:center; width:100%; height:100%; color:#77889D; background:#20262C; } .cover-fallback svg { width:32px; height:32px; } .skeleton { min-height:230px; border:1px solid var(--line); border-radius:var(--r-md); background:linear-gradient(90deg, #1A1D20 25%, #262B2E 50%, #1A1D20 75%); background-size:200% 100%; animation:shimmer 1.3s ease-in-out infinite; } @keyframes shimmer { to { background-position:-200% 0; } }
+        .empty-state { display:flex; gap:13px; align-items:flex-start; max-width:560px; margin:28px 0; padding:20px; border:1px dashed #52606A; color:var(--muted); } .empty-state svg { width:26px; height:26px; flex:0 0 auto; color:var(--blue); } .empty-state h3 { margin:0; color:var(--text); font-size:15px; } .empty-state p { margin:5px 0 0; font-size:13px; } .empty-state a { display:inline-block; margin-top:8px; color:#AFC7FF; font-weight:800; }
+
+        #toast-container { position:fixed; z-index:400; right:20px; bottom:20px; display:grid; gap:9px; width:min(380px, calc(100vw - 32px)); } .toast { display:grid; grid-template-columns:8px 1fr 36px; gap:11px; align-items:center; padding:12px 8px 12px 13px; color:var(--text); border:1px solid #414A52; border-radius:var(--r-md); background:#20252A; box-shadow:0 16px 40px rgb(0 0 0 / .35); font-size:13px; animation:toast-in .18s ease-out; } .toast-marker { width:8px; height:8px; border-radius:50%; background:var(--blue); } .toast-success .toast-marker { background:var(--green); } .toast-warning .toast-marker { background:var(--amber); } .toast-error .toast-marker { background:var(--red); } .toast-close { width:36px; height:36px; border:0; color:var(--muted); background:transparent; font-size:20px; } .toast.hiding { opacity:0; transform:translateY(8px); transition:.18s ease; } @keyframes toast-in { from { opacity:0; transform:translateY(8px); } }
+        .modal-backdrop { position:fixed; inset:0; z-index:350; display:grid; place-items:center; padding:20px; background:rgb(0 0 0 / .6); } .modal-card { width:min(480px, 100%); max-height:calc(100dvh - 40px); overflow:auto; padding:28px; color:var(--dark-text); border-radius:var(--r-lg); background:var(--paper); box-shadow:0 28px 80px rgb(0 0 0 / .46); } .modal-icon { display:grid; place-items:center; width:42px; height:42px; margin-bottom:16px; color:#2452A8; border-radius:50%; background:#D8E5FF; } .modal-icon.is-warning { color:#795007; background:#FFE5AD; } .modal-icon.is-danger { color:#922D2D; background:#FFD6D4; } .modal-icon svg { width:23px; height:23px; } .modal-card h3 { margin:0; font-size:24px; letter-spacing:-.04em; } .modal-card > p { margin:7px 0 0; color:#60635D; } .modal-details { margin-top:18px; padding:14px; background:#DEDAD0; } .modal-details p { margin:0; color:#50534E; font-size:13px; } .modal-details ol { margin:10px 0 0; padding-left:18px; color:#50534E; font-size:13px; } .modal-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:20px; } .modal-actions .btn-secondary { color:#2D3034; border-color:#98978E; }
+        footer { display:flex; justify-content:space-between; gap:16px; margin-top:48px; padding-top:18px; color:var(--dim); border-top:1px solid var(--line); font-size:12px; } footer a { text-decoration:none; } footer a:hover { color:var(--text); } .footer-links { display:flex; flex-wrap:wrap; gap:14px; } .mission-footer { display:none; }
+
+        @media (max-width:1050px) { .masthead { grid-template-columns:1fr auto; } .nav-tabs { grid-column:1 / -1; grid-row:2; justify-self:stretch; justify-content:center; margin-bottom:18px; } .header-utility { grid-column:2; grid-row:1; } .mission-stage { grid-template-columns:1fr; } .passport { min-height:0; } .task-deck { min-height:520px; } .games-grid { grid-template-columns:repeat(4, minmax(0, 1fr)); } }
+        @media (max-width:720px) { .site { padding:0 16px 32px; } .masthead { min-height:124px; gap:12px; } .brand-subtitle { display:none; } .header-utility { font-size:10px; } .nav-tabs { margin:0 0 14px; } .tab-btn { flex:1; padding:0 9px; } .system-rail { grid-template-columns:repeat(2, 1fr); } .rail-item { min-height:76px; padding:12px; border-bottom:1px solid var(--line); } .rail-item:nth-child(2) { border-right:0; } .rail-item:nth-child(3), .rail-item:nth-child(4) { border-bottom:0; } .rail-feature { grid-column:auto; } .rail-caption { display:none; } .rail-value { font-size:21px; } main { padding-top:34px; } .view-lead { grid-template-columns:1fr; gap:14px; margin-bottom:20px; } .view-lead h2 { font-size:34px; } .lead-note { padding-top:12px; } .passport, .task-deck { padding:22px 17px; } .passport-top { display:block; } .passport-stamp { display:inline-flex; margin-top:14px; } .security-note { margin:18px 0; padding:13px; } .button-row { display:grid; grid-template-columns:1fr; } .button-row .btn { width:100%; } .task-deck { min-height:468px; } .query-dock { grid-template-columns:1fr; padding:16px; } .query-dock .btn { width:100%; } .games-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); gap:11px; } .free-games-grid { grid-template-columns:1fr; } .notice { justify-content:flex-start; text-align:left; } footer { display:grid; } }
+        @media (max-width:389px) { .games-grid { grid-template-columns:1fr; } .masthead { grid-template-columns:minmax(0, 1fr) auto; } .brand-name { font-size:15px; } .header-utility { gap:5px; } }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior:auto !important; animation-duration:1ms !important; animation-iteration-count:1 !important; transition-duration:1ms !important; } }
+
+        /* V3 — bright technology system. This intentionally supersedes the dark launch-deck palette above. */
+        :root { --ink:#F5F9FF; --ink-raised:#FFFFFF; --ink-soft:#EAF3FF; --ink-deep:#F9FCFF; --paper:#FFFFFF; --paper-soft:#E6F1FF; --line:#C9DBF1; --line-light:#D7E5F5; --text:#112C56; --muted:#607493; --dim:#8BA0BE; --dark-text:#10284F; --blue:#1769FF; --blue-dark:#1458F5; --lime:#0EBE96; --green:#0EBE96; --amber:#F6A824; --red:#E45B70; }
+        html { background:#F5F9FF; }
+        body { color:var(--text); background:#F5F9FF; }
+        body::before { content:""; position:fixed; z-index:-1; inset:0; pointer-events:none; background-image:radial-gradient(#C9DEF8 1px, transparent 1px); background-size:18px 18px; opacity:.38; }
+        #page-loader { background:#F5F9FF; } .loader-mark { border-color:#B8D0F0; border-top-color:var(--blue); }
+        .notice { color:#164988; background:#E5F1FF; border-bottom:1px solid #B9D7F6; } .notice a { color:#1458D9; } .notice-close { color:#164988; }
+        .site { max-width:1500px; } .masthead { min-height:96px; border-bottom:1px solid #B9D4F0; } .brand-name { color:#10284F; } .brand-subtitle { color:#6C83A5; } .brand-mark { color:#1458F5; border-color:#9EC2F2; background:#FFFFFF; box-shadow:0 8px 22px rgb(45 114 222 / .12); }
+        .nav-tabs { border-color:#B7D0EF; background:#EEF6FF; box-shadow:inset 0 0 0 1px rgb(255 255 255 / .8); } .tab-btn { color:#557095; } .tab-btn:hover { color:#163A70; background:#E2EFFF; } .tab-btn-active, .tab-btn-active:hover { color:#FFFFFF; background:#1769FF; box-shadow:0 4px 10px rgb(23 105 255 / .2); }
+        .header-utility { color:#47729A; } .service-state { color:#28618C; } .state-dot { background:#0EBE96; box-shadow:0 0 0 4px rgb(14 190 150 / .12); } .is-checking .state-dot { background:#F6A824; } .is-unavailable .state-dot { background:#E45B70; }
+        .system-rail { position:relative; margin-top:14px; border:1px solid #C5D9F0; border-radius:18px; overflow:hidden; background:rgb(255 255 255 / .78); box-shadow:0 14px 35px rgb(46 107 184 / .07); } .system-rail::before { content:""; position:absolute; inset:0 0 auto; height:3px; background:#22A8E8; } .rail-item { min-height:88px; border-color:#D8E6F4; } .rail-feature { color:#10284F; background:#FFFFFF; } .rail-feature .rail-label, .rail-feature .rail-caption { color:#6883A6; } .rail-feature .rail-value { color:#1458D9; } .rail-label { color:#66809F; } .rail-value { color:#183E72; } .rail-caption, .rail-index { color:#7B9CBE; }
+        main { padding-top:56px; } .eyebrow { color:#1769FF; } .view-lead h2 { color:#10284F; } .view-lead p:not(.eyebrow) { color:#617A9B; } .lead-note { color:#365A84; border-color:#20B7DA; background:rgb(255 255 255 / .72); box-shadow:0 10px 28px rgb(38 121 210 / .06); } .lead-note strong { color:#0A8CB9; }
+        .mission-stage { gap:12px; border:0; overflow:visible; background:transparent; } .passport { min-height:620px; color:#10284F; border:1px solid #BDD7F3; border-radius:24px; background:#FFFFFF; box-shadow:0 18px 42px rgb(46 107 184 / .10); } .passport-top { border-color:#D7E6F5; } .passport-kicker { color:#5183C4; } .passport h3 { color:#10284F; } .passport-copy { color:#607493; } .passport-stamp { color:#1769D9; border-color:#A9CCF5; background:#F5FAFF; }
+        .security-note { border-left-color:#14A7DC; background:#EAF6FF; } .security-note svg { color:#1586C7; } .security-note h4 { color:#1A4A78; } .security-note ul { color:#486A8D; } .security-note li { border-left-color:#9ACBF1; } .security-note a { color:#1458D9; }
+        .field-label { color:#214A77; } .field-input { color:#183B68; border-color:#B7CEE8; background:#FBFDFF; } .field-input::placeholder { color:#91A7C0; } .field-input:hover { border-color:#6197D5; } .field-input:focus { border-color:#1769FF; box-shadow:0 0 0 3px rgb(23 105 255 / .14); } .password-toggle { color:#2B67A1; } .field-hint { color:#6E86A2; } .form-options { color:#48698C; } .custom-checkbox { accent-color:#1769FF; }
+        .btn-primary { background:#1769FF; box-shadow:0 8px 16px rgb(23 105 255 / .18); } .btn-primary:hover { background:#0F58DE; } .passport .btn-secondary, .btn-secondary { color:#215082; border-color:#AFC9E6; background:#FFFFFF; } .passport .btn-secondary:hover, .btn-secondary:hover { background:#EFF7FF; border-color:#6B9DD3; }
+        .task-deck { color:#10284F; border:1px solid #B8D9F5; border-radius:24px; background:#EAF6FF; box-shadow:0 18px 42px rgb(46 107 184 / .10); } .task-deck::before { height:4px; background:#20B7DA; } .task-kicker { color:#168EC1; } .task-deck h3 { color:#143C6A; } #task-summary-text { color:#557697; } .task-steps { border-color:#C6DDF2; } .task-step { color:#6E8FB0; border-color:#C6DDF2; } .task-step-index { color:#6090C1; border-color:#9EC5E7; } .task-step.is-active { color:#1458D9; background:#D9EEFF; } .task-step.is-active .task-step-index { color:#FFFFFF; border-color:#1769FF; background:#1769FF; } .task-step.is-complete { color:#18795D; } .task-step.is-complete .task-step-index { color:#FFFFFF; border-color:#0EBE96; background:#0EBE96; }
+        .terminal-toolbar { color:#416E99; } .terminal-title { color:#2E6A9C; } .clear-log { color:#3779B4; } .terminal { border-color:#BDD7EF; background:#FFFFFF; } .terminal-text { color:#315C86; }
+        .library-shell, .drops-shell { border-color:#C7DCF2; } .query-dock { border-color:#BFD8F2; background:#FFFFFF; box-shadow:0 15px 35px rgb(46 107 184 / .08); } .query-dock .field-label { color:#315E8B; } .query-dock .field-input { color:#183B68; border-color:#B7CEE8; background:#FBFDFF; } .query-dock .field-input::placeholder { color:#91A7C0; } .result-header h3 { color:#173E6C; } .count-badge { color:#FFFFFF; background:#0EBE96; }
+        .game-card, .free-game-card { color:#173E6C; border-color:#C6DBF0; background:#FFFFFF; box-shadow:0 10px 26px rgb(42 102 177 / .07); } .game-card:hover, .free-game-card:hover { border-color:#4E91E2; box-shadow:0 15px 30px rgb(31 104 205 / .13); } .game-cover, .free-cover { background:#E4F0FC; } .cover-fallback { color:#5B96CA; background:#E8F3FF; } .game-name { color:#173E6C; } .game-meta { color:#6E8BAB; } .free-game-card { background:#FFFFFF; } .free-game-card .game-info { border-color:#22A8E8; } .free-badge { color:#FFFFFF; background:#0EBE96; } .free-description { color:#67809E; }
+        .skeleton { border-color:#CEE0F3; background:linear-gradient(90deg,#EEF6FF 25%,#DDEEFF 50%,#EEF6FF 75%); } .empty-state { color:#617A9B; border-color:#A5C8E9; background:#FFFFFF; } .empty-state svg { color:#1769FF; } .empty-state h3 { color:#173E6C; } .empty-state a { color:#1458D9; }
+        .toast { color:#183B68; border-color:#BBD5F0; background:#FFFFFF; box-shadow:0 16px 38px rgb(43 107 184 / .18); } .toast-close { color:#527A9F; }
+        .modal-backdrop { background:rgb(27 74 124 / .28); } .modal-card { color:#10284F; border:1px solid #BDD7F3; background:#FFFFFF; box-shadow:0 26px 74px rgb(30 87 145 / .25); } .modal-icon { color:#1769FF; background:#E4F0FF; } .modal-icon.is-warning { color:#9C6700; background:#FFF0CE; } .modal-icon.is-danger { color:#B33C54; background:#FFE3E7; } .modal-card > p { color:#627A98; } .modal-details { background:#EFF7FF; } .modal-details p, .modal-details ol { color:#496C8D; } .modal-actions .btn-secondary { color:#215082; border-color:#AFC9E6; }
+        footer { color:#7290B0; border-color:#C8DCF1; } footer a:hover { color:#1458D9; }
+        @media (max-width:720px) { .system-rail { margin-top:10px; } .passport, .task-deck { border-radius:18px; } }
+
+        /* V4 production — a mature, motion-led technology interface for the homepage and its preview route. */
+        html.design-v4 { --ink:#F7FAFF; --ink-raised:#FFFFFF; --ink-soft:#EDF5FF; --ink-deep:#F9FCFF; --paper:#FFFFFF; --paper-soft:#E8F2FF; --line:#D4E1F1; --line-light:#E2ECF7; --text:#15375F; --muted:#607B9D; --dim:#8BA6C5; --dark-text:#15375F; --blue:#276DFF; --blue-dark:#1359E8; --lime:#14B88E; --green:#14B88E; --amber:#EC9B2D; --red:#DE5B73; --font-ui:"Space Grotesk", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+        .design-v4 body { background:#F7FAFF; } .design-v4 body::before { background-image:none; }
+        .design-v4 .notice { min-height:34px; color:#2866A1; background:#EEF7FF; border-bottom:1px solid #D4E8F9; } .design-v4 .notice a { color:#1359E8; }
+        .design-v4 .site { max-width:1440px; padding-bottom:64px; } .design-v4 .masthead { position:sticky; top:0; z-index:40; min-height:88px; background:rgb(247 250 255 / .97); border-bottom:1px solid #D9E6F4; } .design-v4 .brand-mark { width:40px; height:40px; color:#FFFFFF; border:0; border-radius:12px; background:#1359E8; box-shadow:0 10px 24px rgb(19 89 232 / .25); } .design-v4 .brand-name { font-size:16px; letter-spacing:-.04em; } .design-v4 .brand-subtitle { color:#7190AF; }
+        .design-v4 .nav-tabs { padding:3px; border-color:#D4E2F1; border-radius:12px; background:#FFFFFF; box-shadow:0 6px 20px rgb(42 98 166 / .07); } .design-v4 .tab-btn { min-height:38px; border-radius:9px; color:#607B9D; } .design-v4 .tab-btn-active, .design-v4 .tab-btn-active:hover { background:#E7F1FF; color:#1359E8; box-shadow:none; } .design-v4 .tab-btn-active::after { content:""; display:block; width:5px; height:5px; margin:2px auto -5px; border-radius:50%; background:#20B7DA; }
+        .design-v4 .system-rail { margin-top:22px; border:0; border-radius:0; background:transparent; box-shadow:none; overflow:visible; } .design-v4 .system-rail::before { left:0; right:auto; top:auto; bottom:-1px; width:100%; height:1px; background:#D5E3F2; } .design-v4 .rail-item { min-height:72px; padding:12px 16px; border-color:#DCE8F5; } .design-v4 .rail-feature { background:transparent; } .design-v4 .rail-value, .design-v4 .rail-feature .rail-value { color:#15375F; font-size:22px; } .design-v4 .rail-label { color:#7290AF; } .design-v4 .rail-index { color:#276DFF; } .design-v4 .rail-caption { color:#14B88E; }
+        .design-v4 main { padding-top:46px; } .design-v4 .view-lead { position:relative; display:block; min-height:350px; margin-bottom:0; padding:54px 56px 48px; overflow:hidden; border-radius:28px 28px 0 0; background:#154A9A; box-shadow:0 18px 42px rgb(23 80 162 / .16); } .design-v4 .view-lead::before { content:""; position:absolute; width:410px; height:410px; right:-122px; top:-186px; border:1px solid rgb(255 255 255 / .52); border-radius:50%; box-shadow:0 0 0 46px rgb(255 255 255 / .08), 0 0 0 92px rgb(255 255 255 / .06); animation:v4-orbit 18s ease-in-out infinite; } .design-v4 .view-lead::after { content:""; position:absolute; right:148px; top:84px; width:13px; height:13px; border:3px solid #45D5F0; border-radius:50%; box-shadow:0 0 0 11px rgb(69 213 240 / .15); animation:v4-signal 2.8s ease-in-out infinite; }
+        .design-v4 .view-lead > div:first-child { position:relative; z-index:1; max-width:670px; } .design-v4 .view-lead .eyebrow { color:#91E8F6; } .design-v4 .view-lead h2 { max-width:670px; color:#FFFFFF; font-size:clamp(38px, 5vw, 66px); letter-spacing:-.07em; } .design-v4 .view-lead p:not(.eyebrow) { color:#D4E8FF; max-width:560px; } .design-v4 .view-lead > .lead-note { position:absolute; z-index:2; left:auto; right:38px; bottom:72px; width:262px; max-width:262px; padding:14px 0 14px 16px; color:#DCEEFF; border-left-color:#45D5F0; background:transparent; box-shadow:none; } .design-v4 .lead-note strong { color:#91E8F6; }
+        .design-v4 .mission-stage { position:relative; z-index:3; gap:16px; margin:-54px 24px 0; } .design-v4 .passport, .design-v4 .task-deck { border:1px solid #D4E2F2; border-radius:20px; box-shadow:0 18px 40px rgb(32 84 152 / .13); } .design-v4 .passport { background:#FFFFFF; } .design-v4 .task-deck { background:#F0F7FF; } .design-v4 .task-deck::before { height:3px; background:#45D5F0; } .design-v4 .passport-top { border-color:#E3ECF6; } .design-v4 .passport-stamp { color:#1359E8; background:#F3F8FF; border-color:#D1E3F8; } .design-v4 .security-note { border-radius:0 10px 10px 0; border-left-color:#276DFF; background:#F1F8FF; } .design-v4 .field-input { border-radius:10px; background:#FCFEFF; } .design-v4 .btn { border-radius:10px; } .design-v4 .btn-primary { background:#1359E8; } .design-v4 .btn-primary:hover { background:#0F48BD; } .design-v4 .terminal { border-radius:12px; background:#FFFFFF; } .design-v4 .task-step.is-active { background:#E2F2FF; }
+        .design-v4 .library-shell, .design-v4 .drops-shell { position:relative; z-index:3; margin:-54px 24px 0; padding:24px; border:1px solid #D4E2F2; border-radius:20px; background:#FFFFFF; box-shadow:0 18px 40px rgb(32 84 152 / .12); } .design-v4 .query-dock { padding:0 0 20px; border:0; border-bottom:1px solid #E0EAF5; border-radius:0; box-shadow:none; } .design-v4 .free-games-grid { gap:16px; } .design-v4 .free-game-card, .design-v4 .game-card { border-radius:14px; } .design-v4 .free-game-card:hover, .design-v4 .game-card:hover { transform:translateY(-5px); }
+        .design-v4 #toast-container { bottom:24px; } .design-v4 .toast { border-radius:12px; } .design-v4 .modal-card { border-radius:20px; animation:v4-rise .28s cubic-bezier(.2,.8,.2,1); }
+        .design-v4 .tab-content:not(.hidden) { animation:v4-page-in .42s cubic-bezier(.2,.8,.2,1); } .design-v4 .state-dot { animation:v4-pulse 2.4s ease-in-out infinite; } .design-v4 .system-rail::after { content:""; position:absolute; bottom:-2px; left:0; width:84px; height:3px; background:#20B7DA; animation:v4-scan 4s ease-in-out infinite; }
+        @keyframes v4-orbit { 0%,100% { transform:rotate(0deg); } 50% { transform:rotate(18deg); } } @keyframes v4-signal { 0%,100% { transform:scale(1); opacity:1; } 50% { transform:scale(1.22); opacity:.65; } } @keyframes v4-pulse { 0%,100% { box-shadow:0 0 0 4px rgb(20 184 142 / .11); } 50% { box-shadow:0 0 0 7px rgb(20 184 142 / .04); } } @keyframes v4-scan { 0%,100% { transform:translateX(0); } 50% { transform:translateX(780px); } } @keyframes v4-page-in { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } } @keyframes v4-rise { from { opacity:0; transform:translateY(8px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
+        @media (max-width:920px) { .design-v4 .view-lead { min-height:300px; padding:42px 34px; } .design-v4 .mission-stage, .design-v4 .library-shell, .design-v4 .drops-shell { margin-left:0; margin-right:0; } .design-v4 .lead-note { right:24px; bottom:56px; } }
+        @media (max-width:720px) { .design-v4 .masthead { position:relative; } .design-v4 .system-rail { margin-top:12px; } .design-v4 .view-lead { min-height:0; padding:34px 22px 64px; border-radius:22px 22px 0 0; } .design-v4 .view-lead h2 { font-size:38px; } .design-v4 .view-lead::before { width:260px; height:260px; right:-110px; top:-142px; box-shadow:0 0 0 28px rgb(255 255 255 / .08), 0 0 0 56px rgb(255 255 255 / .06); } .design-v4 .view-lead::after { right:70px; top:56px; } .design-v4 .lead-note { display:none; } .design-v4 .mission-stage, .design-v4 .library-shell, .design-v4 .drops-shell { margin-top:-32px; } .design-v4 .library-shell, .design-v4 .drops-shell { padding:18px; } .design-v4 .system-rail::after { animation:none; } }
+        /* V4 mission footer — product closing surface, isolated from the V3 footer. */
+        .design-v4 .site { padding-bottom:0; } .design-v4 .v3-footer { display:none; } .design-v4 .mission-footer { position:relative; display:block; margin-top:72px; padding:0; overflow:hidden; color:#EAF4FF; border:1px solid #1F5CAC; border-radius:24px 24px 0 0; background:#133F87; box-shadow:0 22px 48px rgb(18 66 137 / .2); } .design-v4 .mission-footer::before { content:""; position:absolute; top:-220px; right:-130px; width:440px; height:440px; pointer-events:none; border:1px solid rgb(172 223 255 / .35); border-radius:50%; box-shadow:0 0 0 48px rgb(172 223 255 / .07), 0 0 0 96px rgb(172 223 255 / .045); } .design-v4 .mission-footer::after { content:""; position:absolute; z-index:1; top:0; left:42px; width:118px; height:3px; pointer-events:none; transform-origin:left; background:#45D5F0; box-shadow:0 0 18px rgb(69 213 240 / .65); animation:v4-footer-signal 3.2s ease-in-out infinite; } .design-v4 .mission-footer-inner { position:relative; z-index:2; display:grid; grid-template-columns:minmax(0, 1.25fr) minmax(280px, .75fr); gap:64px; padding:48px 52px 34px; } .design-v4 .footer-brand-block { display:grid; grid-template-columns:46px minmax(0, 1fr); gap:16px; align-items:start; max-width:640px; } .design-v4 .footer-mark { display:grid; place-items:center; width:46px; height:46px; color:#FFFFFF; border:1px solid rgb(180 225 255 / .42); border-radius:14px; background:rgb(255 255 255 / .1); box-shadow:inset 0 1px 0 rgb(255 255 255 / .16); } .design-v4 .footer-mark svg { width:23px; height:23px; } .design-v4 .footer-eyebrow, .design-v4 .footer-nav-title { margin:0; color:#91E8F6; font-family:var(--font-mono); font-size:10px; font-weight:700; letter-spacing:.13em; text-transform:uppercase; } .design-v4 .footer-brand-block h2 { max-width:480px; margin:8px 0 10px; color:#FFFFFF; font-size:clamp(25px, 3vw, 36px); line-height:1.08; letter-spacing:-.055em; } .design-v4 .footer-brand-block > div > p:last-child { max-width:510px; margin:0; color:#C3DBF6; font-size:14px; line-height:1.7; } .design-v4 .footer-nav { align-self:start; } .design-v4 .footer-nav-title { margin-bottom:13px; } .design-v4 .footer-nav-links { display:grid; gap:7px; } .design-v4 .footer-nav-link { display:grid; grid-template-columns:minmax(0, 1fr) auto 16px; gap:12px; align-items:center; min-height:46px; padding:0 13px; color:#EAF4FF; border:1px solid rgb(183 221 255 / .2); border-radius:10px; background:rgb(255 255 255 / .055); transition:transform .2s ease, border-color .2s ease, background-color .2s ease; } .design-v4 .footer-nav-link:hover { color:#FFFFFF; border-color:rgb(145 232 246 / .7); background:rgb(255 255 255 / .11); transform:translateX(3px); } .design-v4 .footer-nav-link:focus-visible { outline:3px solid #91E8F6; outline-offset:3px; } .design-v4 .footer-link-label { font-size:14px; font-weight:700; } .design-v4 .footer-link-meta { color:#A5C6EB; font-family:var(--font-mono); font-size:10px; letter-spacing:.06em; } .design-v4 .footer-nav-link svg { width:16px; height:16px; color:#91E8F6; transition:transform .2s ease; } .design-v4 .footer-nav-link:hover svg { transform:translate(2px, -2px); } .design-v4 .footer-bottom { position:relative; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:20px; min-height:58px; padding:0 52px; color:#B8D3F1; border-top:1px solid rgb(184 220 255 / .18); font-size:12px; } .design-v4 .footer-status { display:inline-flex; align-items:center; gap:9px; margin:0; } .design-v4 .footer-status-dot { width:8px; height:8px; border-radius:50%; background:#45D5F0; box-shadow:0 0 0 5px rgb(69 213 240 / .13); animation:v4-footer-pulse 2.6s ease-in-out infinite; } .design-v4 .footer-copyright { margin:0; color:#9ABEE5; font-family:var(--font-mono); font-size:10px; letter-spacing:.06em; }
+        @keyframes v4-footer-signal { 0%,100% { transform:scaleX(.55); opacity:.65; } 50% { transform:scaleX(1); opacity:1; } } @keyframes v4-footer-pulse { 0%,100% { transform:scale(1); opacity:1; } 50% { transform:scale(1.15); opacity:.72; } }
+        @media (max-width:720px) { .design-v4 .mission-footer { margin-top:48px; border-radius:18px 18px 0 0; } .design-v4 .mission-footer::before { top:-116px; right:-182px; width:300px; height:300px; box-shadow:0 0 0 32px rgb(172 223 255 / .07), 0 0 0 64px rgb(172 223 255 / .045); } .design-v4 .mission-footer::after { left:22px; } .design-v4 .mission-footer-inner { grid-template-columns:1fr; gap:34px; padding:34px 22px 28px; } .design-v4 .footer-brand-block { grid-template-columns:40px minmax(0, 1fr); gap:13px; } .design-v4 .footer-mark { width:40px; height:40px; border-radius:12px; } .design-v4 .footer-brand-block h2 { margin-top:7px; font-size:27px; } .design-v4 .footer-brand-block > div > p:last-child { font-size:13px; } .design-v4 .footer-nav-link { min-height:48px; } .design-v4 .footer-bottom { display:grid; gap:9px; min-height:0; padding:18px 22px 22px; } .design-v4 .footer-copyright { line-height:1.5; } }
+        /* V4 footer channel icons — semantic SVGs keep quick visual scanning without replacing text labels. */
+        .design-v4 .footer-nav-link { grid-template-columns:28px minmax(0, 1fr) auto 16px; } .design-v4 .footer-link-icon { display:grid; place-items:center; width:28px; height:28px; color:#91E8F6; border:1px solid rgb(145 232 246 / .28); border-radius:8px; background:rgb(69 213 240 / .08); } .design-v4 .footer-link-icon svg { width:16px; height:16px; color:currentColor; transition:none; } .design-v4 .footer-nav-link:hover .footer-link-icon { color:#FFFFFF; border-color:rgb(145 232 246 / .7); background:rgb(69 213 240 / .18); } .design-v4 .footer-nav-link:hover .footer-link-icon svg { transform:none; }
+        /* V4 compact channel grid — two columns, two rows, with the same 44px-plus touch targets. */
+        .design-v4 .mission-footer { margin-top:48px; } .design-v4 .mission-footer-inner { gap:48px; padding:34px 52px 24px; } .design-v4 .footer-brand-block h2 { font-size:clamp(24px, 2.6vw, 32px); } .design-v4 .footer-nav-links { grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .design-v4 .footer-nav-link { min-height:46px; padding:0 12px; } .design-v4 .footer-bottom { min-height:50px; }
+        @media (max-width:720px) { .design-v4 .mission-footer { margin-top:40px; } .design-v4 .mission-footer-inner { gap:26px; padding:28px 22px 22px; } .design-v4 .footer-nav-links { grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .design-v4 .footer-nav-link { grid-template-columns:26px minmax(0, 1fr); gap:8px; min-height:64px; padding:0 10px; } .design-v4 .footer-link-icon { width:26px; height:26px; border-radius:7px; } .design-v4 .footer-link-label { font-size:13px; line-height:1.25; } .design-v4 .footer-link-meta, .design-v4 .footer-nav-link > svg { display:none; } .design-v4 .footer-bottom { padding:16px 22px 18px; } }
+        .design-v4 .footer-nav-link { grid-template-columns:28px minmax(0, 1fr) auto 14px; gap:8px; padding:0 10px; } .design-v4 .footer-link-label { white-space:nowrap; } .design-v4 .footer-nav-link > svg { width:14px; height:14px; }
     </style>
 </head>
 <body>
-    <!-- 页面加载遮罩 -->
-    <div id="page-loader"><div class="spinner"></div></div>
-
-    <div id="toast-container"></div>
-
-    <!-- 顶部公告栏 - 可手动关闭 -->
-    <div id="announcement-bar" class="announcement-bar py-3 px-4 text-center text-sm relative">
-        <div class="flex items-center justify-center gap-2 flex-wrap pr-8">
-            <span>📢</span>
-            <span class="text-blue-200">使用前请阅读账号与两步验证说明。教程与更新：
-                <a href="https://space.bilibili.com/59438380" target="_blank" class="text-blue-400 hover:text-blue-300 font-semibold hover:underline">一万AI分享</a>
-            </span>
-        </div>
-        <button onclick="closeAnnouncement()" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors text-lg" title="关闭公告">✕</button>
+    <a class="skip-link" href="#main-content">跳至主内容</a>
+    <div id="page-loader" aria-label="页面加载中"><span class="loader-mark" aria-hidden="true"></span></div>
+    <div id="announcement-bar" class="notice" role="status">
+        <div class="notice-inner"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 3v18m9-9H3"></path></svg><span>使用前请阅读账号与两步验证说明。教程与更新：<a href="https://space.bilibili.com/59438380" target="_blank" rel="noopener noreferrer">一万AI分享</a></span></div>
+        <button type="button" class="notice-close" onclick="closeAnnouncement()" aria-label="关闭公告">&times;</button>
     </div>
+    <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-    <div class="content-wrapper">
+    <div class="site">
+        <header class="masthead">
+            <a class="brand" href="#" aria-label="Epic 自动驾驶首页">
+                <span class="brand-mark" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9" d="M13 3 4 14h7v7l9-11h-7V3z"></path></svg></span>
+                <span><h1 class="brand-name">Epic 自动驾驶</h1><p class="brand-subtitle">每周免费游戏托管与资产查询</p></span>
+            </a>
+            <nav class="nav-tabs" role="tablist" aria-label="主要功能">
+                <button type="button" id="tab-deposit" class="tab-btn tab-btn-active" role="tab" aria-selected="true" aria-controls="view-deposit" onclick="switchTab('deposit')">控制台</button>
+                <button type="button" id="tab-query" class="tab-btn tab-btn-inactive" role="tab" aria-selected="false" aria-controls="view-query" tabindex="-1" onclick="switchTab('query')">资产</button>
+                <button type="button" id="tab-free-games" class="tab-btn tab-btn-inactive" role="tab" aria-selected="false" aria-controls="view-free-games" tabindex="-1" onclick="switchTab('free-games')">本周免费</button>
+            </nav>
+            <div id="service-status" class="header-utility service-state is-checking" aria-live="polite"><span class="state-dot" aria-hidden="true"></span><span>正在检查服务</span></div>
+        </header>
 
-        <!-- 头部 -->
-        <div class="app-header fade-in" style="animation-delay: 0.1s;">
-            <div class="brand-row flex items-center gap-3">
-                <div class="brand-mark flex items-center justify-center">
-                    <svg class="w-7 h-7 text-white" style="width:28px;height:28px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                </div>
-                <div>
-                    <h1 class="brand-title text-2xl font-bold">Epic 自动驾驶</h1>
-                    <p class="brand-subtitle text-sm">自动领取免费游戏与资产管理</p>
-                </div>
-            </div>
-
-            <div class="app-nav flex gap-1" role="tablist" aria-label="主要功能">
-                <button onclick="switchTab('deposit')" id="tab-deposit" class="tab-btn tab-btn-active" role="tab">控制台</button>
-                <button onclick="switchTab('query')" id="tab-query" class="tab-btn tab-btn-inactive" role="tab">资产</button>
-                <button onclick="switchTab('free-games')" id="tab-free-games" class="tab-btn tab-btn-inactive" role="tab">本周免费</button>
-            </div>
-        </div>
-
-        <!-- 统计状态栏 - 紧凑横向布局 -->
-        <section id="stats-section" class="stats-section fade-in" style="animation-delay: 0.12s;">
-            <h2 class="stats-section-title section-heading hidden">运行概览</h2>
-            <div class="stats-bar">
-                <div class="stat-item">
-                    <div class="stat-icon bg-blue-500/20" style="width:44px;height:44px;flex-shrink:0">
-                        <svg class="w-6 h-6 text-blue-400" style="width:24px;height:24px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                    </div>
-                    <div>
-                        <p class="stat-label">有效账号</p>
-                        <p class="stat-value text-white" id="stat-accounts">--</p>
-                    </div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-icon bg-green-500/20" style="width:44px;height:44px;flex-shrink:0">
-                        <svg class="w-6 h-6 text-green-400" style="width:24px;height:24px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    </div>
-                    <div>
-                        <p class="stat-label">今日领取</p>
-                        <p class="stat-value text-green-400" id="stat-today">--</p>
-                    </div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-icon bg-purple-500/20" style="width:44px;height:44px;flex-shrink:0">
-                        <svg class="w-6 h-6 text-purple-400" style="width:24px;height:24px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
-                    </div>
-                    <div>
-                        <p class="stat-label">累计资产</p>
-                        <p class="stat-value text-purple-400" id="stat-total">--</p>
-                    </div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-icon bg-amber-500/20" style="width:44px;height:44px;flex-shrink:0">
-                        <svg class="w-6 h-6 text-amber-400" style="width:24px;height:24px;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    </div>
-                    <div>
-                        <p class="stat-label">队列任务</p>
-                        <p class="stat-value text-amber-400" id="stat-queue">--</p>
-                    </div>
-                </div>
-            </div>
+        <section id="stats-section" class="system-rail" aria-labelledby="stats-title">
+            <h2 id="stats-title" class="sr-only">系统概览</h2>
+            <article class="rail-item rail-feature"><span class="rail-index">01</span><div><p class="rail-label">有效账号</p><p class="rail-value" id="stat-accounts">--</p></div><span class="rail-caption">READY</span></article>
+            <article class="rail-item"><span class="rail-index">02</span><div><p class="rail-label">今日领取</p><p class="rail-value" id="stat-today">--</p></div></article>
+            <article class="rail-item"><span class="rail-index">03</span><div><p class="rail-label">累计资产</p><p class="rail-value" id="stat-total">--</p></div></article>
+            <article class="rail-item"><span class="rail-index">04</span><div><p class="rail-label">队列任务</p><p class="rail-value" id="stat-queue">--</p></div></article>
         </section>
 
-        <!-- 主内容区域 -->
-        <div class="main-content">
-
-            <!-- 自动驾驶 Tab -->
-            <div id="view-deposit" class="tab-content-centered fade-in" style="animation-delay: 0.15s;">
-                <div class="dashboard-intro">
-                    <h2>让系统接管每周免费游戏领取</h2>
-                    <p>填写 Epic 账号后，系统将验证登录、处理验证码，并在后续定时任务中自动领取。</p>
+        <main id="main-content">
+            <section id="view-deposit" class="tab-content" role="tabpanel" aria-labelledby="tab-deposit">
+                <div class="view-lead">
+                    <div><p class="eyebrow">Mission / account automation</p><h2>每周的游戏，<br>自动进入你的收藏架。</h2><p>提交账号后，系统建立领取任务并持续展示可验证的运行过程。这里不是普通表单，而是你的游戏托管起点。</p></div>
+                    <div class="lead-note"><strong>OPERATING NOTE</strong>账号、任务和日志始终留在同一条操作路径上；遇到人工验证会明确停止并给出下一步。</div>
                 </div>
-                <div id="work-area-container" class="work-area-container">
-                    <!-- 左侧：工作面板 -->
-                    <div class="work-panel-wrapper">
-                        <div class="work-panel glass-panel">
-                            <h2 class="work-panel-title">托管 Epic 账号</h2>
-                            <p class="work-panel-description">第一步：填写账号。验证成功后会自动加入定时领取。</p>
-
-                            <div class="account-notice text-sm">
-                                <div class="flex items-start gap-3">
-                                    <svg class="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                                    <ul class="space-y-2 list-disc list-inside">
-                                        <li>首次使用建议准备一个新账号：
-                                            <a href="https://www.epicgames.com/id/register" target="_blank" class="text-amber-400 hover:text-amber-300 font-semibold hover:underline">注册 →</a>
-                                        </li>
-                                        <li>自动登录前需要关闭两步验证：
-                                            <a href="https://www.epicgames.com/account/password" target="_blank" class="text-amber-400 hover:text-amber-300 font-semibold hover:underline">设置 →</a>
-                                        </li>
-                                    </ul>
-                                </div>
-                            </div>
-
-                            <div id="deposit-form" class="space-y-5">
-                                <div>
-                                    <label for="d_email" class="form-label">Epic 邮箱</label>
-                                    <input type="email" id="d_email" placeholder="name@example.com" autocomplete="username" class="w-full border work-input focus:outline-none transition-all">
-                                </div>
-                                <div class="relative">
-                                    <label for="d_password" class="form-label">Epic 密码</label>
-                                    <input type="password" id="d_password" placeholder="仅用于自动登录" autocomplete="current-password" class="w-full border work-input focus:outline-none transition-all pr-12">
-                                    <button onclick="togglePwd('d_password', this)" class="absolute right-4 bottom-3 text-slate-400 hover:text-slate-600" title="显示密码" aria-label="显示密码">
-                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0zm6 0c-1.5 4-4.5 6-9 6s-7.5-2-9-6c1.5-4 4.5-6 9-6s7.5 2 9 6z"></path></svg>
-                                    </button>
-                                </div>
-
-                                <div class="flex items-center gap-3 text-sm text-slate-400">
-                                    <input type="checkbox" id="remember_email" class="custom-checkbox">
-                                    <label for="remember_email" class="cursor-pointer">记住邮箱</label>
-                                </div>
-
-                                <button onclick="startVerify()" id="btn-deposit" class="w-full text-white font-semibold work-btn transition-all flex items-center justify-center gap-2">
-                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5v14l11-7z"></path></svg>
-                                    <span>启动引擎</span>
-                                </button>
-
-                                <button onclick="deleteAccount()" id="btn-delete" class="font-semibold transition-all">
-                                    停止托管并删除账号数据
-                                </button>
-                            </div>
+                <div id="work-area-container" class="mission-stage">
+                    <form id="deposit-form" class="passport" novalidate onsubmit="startVerify(); return false;">
+                        <div class="passport-top"><div><p class="passport-kicker">ACCOUNT PASS / 01</p><h3>签发托管通行证</h3><p class="passport-copy">验证完成后，账号将进入每周免费游戏的自动领取流程。</p></div><span class="passport-stamp"><span class="state-dot" aria-hidden="true"></span>安全操作</span></div>
+                        <aside class="security-note" aria-label="账号安全说明"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 8v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg><div><h4>提交前请确认</h4><ul><li>建议使用专门领取周免的 Epic 账号；关闭两步验证会降低账号安全性。</li><li>不要在公共设备上勾选记住邮箱。<a href="https://www.epicgames.com/id/register" target="_blank" rel="noopener noreferrer">注册 Epic 账号</a> · <a href="https://www.epicgames.com/account/password" target="_blank" rel="noopener noreferrer">账号设置</a></li><li>停止托管会删除本地账号记录和浏览器登录态，不会删除 Epic 账号。</li></ul></div></aside>
+                        <div class="account-form">
+                            <div class="field-group"><label class="field-label" for="d_email">Epic 邮箱</label><input id="d_email" class="field-input" type="email" autocomplete="username" placeholder="name@example.com" required></div>
+                            <div class="field-group"><label class="field-label" for="d_password">Epic 密码</label><div class="password-field"><input id="d_password" class="field-input" type="password" autocomplete="current-password" placeholder="仅用于自动登录验证" required><button type="button" class="password-toggle" onclick="togglePwd('d_password', this)" title="显示密码" aria-label="显示密码"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 0c-1.5 4-4.5 6-9 6s-7.5-2-9-6c1.5-4 4.5-6 9-6s7.5 2 9 6Z"></path></svg></button></div><span class="field-hint">仅在提交验证时使用；启动后密码输入框会清空。</span></div>
+                            <div class="form-options"><input id="remember_email" class="custom-checkbox" type="checkbox"><label for="remember_email">在此设备记住邮箱</label></div>
+                            <div class="button-row"><button id="btn-deposit" class="btn btn-primary" type="submit"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9" d="M8 5v14l11-7z"></path></svg><span>启动引擎</span></button><button id="btn-delete" class="btn btn-secondary" type="button" onclick="deleteAccount()">停止托管并删除账号数据</button></div>
                         </div>
-                    </div>
-
-                    <!-- 右侧：系统日志面板（工作中显示） -->
-                    <div id="status-panel-wrapper" class="status-panel-wrapper">
-                        <div class="status-panel glass-panel flex flex-col">
-                            <div class="task-summary">
-                                <h3>当前任务</h3>
-                                <p id="task-summary-text">暂无运行中的任务。启动后会在这里显示关键进度。</p>
-                            </div>
-                            <div class="task-steps" aria-label="任务步骤">
-                                <div class="task-step"><span class="task-step-index">1</span><span>提交账号</span></div>
-                                <div class="task-step"><span class="task-step-index">2</span><span>验证登录与验证码</span></div>
-                                <div class="task-step"><span class="task-step-index">3</span><span>领取并保存结果</span></div>
-                            </div>
-                            <div class="flex justify-between items-center mb-3 px-1">
-                                <span class="text-sm text-slate-400 flex items-center gap-2">
-                                    <span class="w-2 h-2 bg-green-500 rounded-full"></span>
-                                    任务日志
-                                </span>
-                                <button onclick="document.getElementById('status-log').innerText='准备就绪。'" class="text-xs text-slate-600 hover:text-slate-400">清空</button>
-                            </div>
-                            <div class="terminal p-4 flex-1 overflow-y-auto flex flex-col-reverse">
-                                <div id="status-log" class="terminal-text text-sm leading-relaxed whitespace-pre-wrap">准备就绪。</div>
-                            </div>
-                        </div>
-                    </div>
+                    </form>
+                    <aside id="status-panel-wrapper" class="task-deck" aria-labelledby="task-panel-title">
+                        <p class="task-kicker">MISSION STATUS</p><h3 id="task-panel-title">当前任务</h3><p id="task-summary-text" aria-live="polite">暂无运行中的任务。启动后会在这里显示关键进度。</p>
+                        <div class="task-steps" aria-label="任务步骤"><div class="task-step" data-step="1"><span class="task-step-index">1</span><span>签发账号通行证</span></div><div class="task-step" data-step="2"><span class="task-step-index">2</span><span>验证登录与验证码</span></div><div class="task-step" data-step="3"><span class="task-step-index">3</span><span>领取并保存结果</span></div></div>
+                        <div class="terminal-toolbar"><span class="terminal-title"><span class="state-dot" aria-hidden="true"></span>任务日志</span><button type="button" class="clear-log" onclick="clearTaskLog()">清空</button></div>
+                        <div class="terminal" role="log" aria-label="任务日志区域" aria-live="off"><pre id="status-log" class="terminal-text">准备就绪。</pre></div>
+                    </aside>
                 </div>
+            </section>
+
+            <section id="view-query" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-query">
+                <div class="view-lead"><div><p class="eyebrow">Collection / game library</p><h2>找回这台自动驾驶<br>为你收下的每一份礼物。</h2><p>输入托管账号凭据，查看系统记录的游戏与领取日期。</p></div><div class="lead-note"><strong>LIBRARY VIEW</strong>封面是主角；领取日期和商店入口被收束为辅助索引。</div></div>
+                <div class="library-shell"><form class="query-dock" novalidate onsubmit="doQuery(); return false;"><div class="field-group"><label class="field-label" for="q_email">Epic 邮箱</label><input id="q_email" class="field-input" type="email" autocomplete="username" placeholder="name@example.com" required></div><div class="field-group"><label class="field-label" for="q_password">Epic 密码</label><input id="q_password" class="field-input" type="password" autocomplete="current-password" placeholder="用于身份确认"></div><button id="btn-query" class="btn btn-primary" type="submit">打开资产库</button></form>
+                    <div id="skeleton-grid" class="games-grid hidden" aria-label="正在加载资产"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+                    <div id="query-result-area" class="hidden"><div class="result-header"><h3>已入库游戏</h3><span id="log-count" class="count-badge">0</span></div><div id="games-grid" class="games-grid"></div><div id="empty-msg" class="empty-state hidden"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M3 6.5C5 5.5 7 5 9 6s3 1 3 1 1-1 3-1 4 0 6 1v11c-2-1-4-1.5-6-.5s-3 1-3 1-1-1-3-1-4-.5-6 .5v-11Z"></path></svg><div><h3>暂未记录资产</h3><p>先在控制台完成账号托管，领取记录会显示在这里。</p></div></div></div>
+                </div>
+            </section>
+
+            <section id="view-free-games" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-free-games">
+                <div class="view-lead"><div><p class="eyebrow">Weekly drop / Epic Games Store</p><h2>这一周，哪些游戏<br>值得现在入库？</h2><p>数据来自 Epic Games Store 促销接口；最终可用性和领取期限以商店页面为准。</p></div><div class="lead-note"><strong>WEEKLY DROP</strong>正在免费提供的作品会以大封面发行卡呈现，不使用夸张缎带或装饰标签。</div></div>
+                <div class="drops-shell"><div id="free-games-skeleton" class="free-games-grid" aria-label="正在加载本周免费游戏"><div class="skeleton"></div><div class="skeleton"></div></div><div id="free-games-grid" class="free-games-grid hidden"></div><div id="free-games-empty" class="empty-state hidden"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M12 3v18m-9-9h18"></path></svg><div><h3>暂未获取到免费游戏</h3><p>Epic 通常会在每周四晚间更新免费促销。</p><a href="https://store.epicgames.com/zh-CN/free-games" target="_blank" rel="noopener noreferrer">前往 Epic 商店查看</a></div></div></div>
+            </section>
+        </main>
+        <footer class="v3-footer"><a href="https://github.com/10000ge10000/epic-kiosk" target="_blank" rel="noopener noreferrer">10000ge10000/epic-kiosk</a><div class="footer-links"><a href="https://space.bilibili.com/59438380" target="_blank" rel="noopener noreferrer">Bilibili</a><a href="https://www.youtube.com/channel/UCqgvZnCN9-9pZcL4SWxmnDw" target="_blank" rel="noopener noreferrer">YouTube</a><a href="https://blog.910501.xyz/" target="_blank" rel="noopener noreferrer">Blog</a></div></footer>
+        <footer class="mission-footer" aria-label="Epic 自动驾驶站点信息">
+            <div class="mission-footer-inner">
+                <section class="footer-brand-block" aria-labelledby="footer-title">
+                    <div class="footer-mark" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9" d="m13.5 2.8-8.2 10h5.6l-.7 8.4 8.2-10h-5.6l.7-8.4Z"></path></svg></div>
+                    <div><p class="footer-eyebrow">Epic Autopilot / System Endpoint</p><h2 id="footer-title">每周领取，始终有迹可循。</h2><p>账号托管、任务状态与资产记录，收束为一个清晰、可追溯的游戏工作流。</p></div>
+                </section>
+                <nav class="footer-nav" aria-label="项目与内容渠道">
+                    <p class="footer-nav-title">Operator Channels</p>
+                    <div class="footer-nav-links">
+                        <a class="footer-nav-link" href="https://github.com/10000ge10000/epic-kiosk" target="_blank" rel="noopener noreferrer" aria-label="在新窗口打开 GitHub 项目仓库"><span class="footer-link-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m8 9-3 3 3 3m8-6 3 3-3 3M14 4l-4 16"></path></svg></span><span class="footer-link-label">项目源码</span><span class="footer-link-meta">GITHUB</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 17 17 7M9 7h8v8"></path></svg></a>
+                        <a class="footer-nav-link" href="https://space.bilibili.com/59438380" target="_blank" rel="noopener noreferrer" aria-label="在新窗口打开 Bilibili 教程频道"><span class="footer-link-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 5.8A2.8 2.8 0 0 1 6.8 3H11v16H6.8A2.8 2.8 0 0 0 4 21V5.8ZM20 5.8A2.8 2.8 0 0 0 17.2 3H13v16h4.2A2.8 2.8 0 0 1 20 21V5.8Z"></path></svg></span><span class="footer-link-label">教程与更新</span><span class="footer-link-meta">BILIBILI</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 17 17 7M9 7h8v8"></path></svg></a>
+                        <a class="footer-nav-link" href="https://www.youtube.com/channel/UCqgvZnCN9-9pZcL4SWxmnDw" target="_blank" rel="noopener noreferrer" aria-label="在新窗口打开 YouTube 频道"><span class="footer-link-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect width="18" height="14" x="3" y="5" rx="3" stroke-width="1.8"></rect><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m10 9 5 3-5 3V9Z"></path></svg></span><span class="footer-link-label">视频内容</span><span class="footer-link-meta">YOUTUBE</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 17 17 7M9 7h8v8"></path></svg></a>
+                        <a class="footer-nav-link" href="https://blog.910501.xyz/" target="_blank" rel="noopener noreferrer" aria-label="在新窗口打开技术博客"><span class="footer-link-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M14 3v6h6M8 13h8M8 17h5"></path></svg></span><span class="footer-link-label">技术博客</span><span class="footer-link-meta">BLOG</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 17 17 7M9 7h8v8"></path></svg></a>
+                    </div>
+                </nav>
             </div>
-
-            <!-- 资产清单 Tab -->
-            <div id="view-query" class="tab-content tab-content-scroll hidden">
-                <div class="query-shell">
-                    <div class="dashboard-intro">
-                        <h2>查询账号资产</h2>
-                        <p>输入托管邮箱，查看系统已经为该账号记录的免费游戏。</p>
-                    </div>
-                    <div class="query-toolbar flex">
-                        <input type="email" id="q_email" placeholder="输入 Epic 邮箱" class="flex-1 bg-transparent px-4 py-3 focus:outline-none text-base">
-                        <input type="password" id="q_password" placeholder="密码" autocomplete="current-password" class="w-32 bg-transparent px-3 py-3 border-l border-slate-700 focus:outline-none text-base">
-                        <button onclick="doQuery()" id="btn-query" class="text-white px-6 font-semibold transition-all">查询</button>
-                    </div>
-
-                    <div id="skeleton-grid" class="hidden games-grid">
-                        <div class="skeleton h-64"></div>
-                        <div class="skeleton h-64"></div>
-                        <div class="skeleton h-64"></div>
-                        <div class="skeleton h-64"></div>
-                        <div class="skeleton h-64"></div>
-                    </div>
-
-                    <div id="query-result-area" class="hidden">
-                        <div class="flex justify-between items-center mb-4 px-1">
-                            <h3 class="section-heading mb-0">资产列表</h3>
-                            <span id="log-count" class="bg-blue-50 text-blue-700 text-sm px-3 py-1 rounded-full">0</span>
-                        </div>
-                        <div id="games-grid" class="games-grid"></div>
-                        <div id="empty-msg" class="hidden text-center py-16 text-slate-500">
-                            <p class="font-semibold text-slate-700">暂未记录资产</p>
-                            <p class="mt-2 text-sm">先在控制台完成账号托管，领取记录会显示在这里。</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 免费游戏 Tab -->
-            <div id="view-free-games" class="tab-content tab-content-scroll hidden">
-                <div class="free-games-shell">
-                    <div class="dashboard-intro">
-                        <h2>本周免费游戏</h2>
-                        <p>数据来自 Epic Games Store 官方促销接口，点击卡片可前往商店查看。</p>
-                    </div>
-
-                    <div id="free-games-skeleton" class="free-games-grid">
-                        <div class="skeleton h-80"></div>
-                        <div class="skeleton h-80"></div>
-                    </div>
-
-                    <div id="free-games-grid" class="hidden free-games-grid"></div>
-
-                    <div id="free-games-empty" class="hidden text-center py-16 text-slate-500">
-                        <p class="text-lg font-semibold text-slate-700 mb-2">暂未获取到免费游戏</p>
-                        <p class="text-sm">Epic 通常会在每周四晚间更新免费促销。</p>
-                        <a href="https://store.epicgames.com/zh-CN/free-games" target="_blank" rel="noopener noreferrer" class="inline-block mt-4 text-blue-600 hover:text-blue-700 text-base">前往 Epic 官网查看 →</a>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- 成功弹窗 -->
-        <div id="success-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden">
-            <div class="modal-card border p-6 shadow-2xl max-w-md w-full text-center modal-enter relative mx-4">
-                <div class="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg class="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
-                </div>
-                <h3 class="text-xl font-bold mb-2">领取成功</h3>
-                <p class="text-slate-400 text-sm mb-4">游戏已确认加入该账号资产。</p>
-                <div class="bg-slate-800 rounded-lg p-4 mb-4">
-                    <p class="text-xs text-slate-500">本次新增资产</p>
-                    <p id="modal-game-name" class="text-lg font-bold text-blue-400 mt-1">Unknown Game</p>
-                </div>
-                <div class="flex flex-col gap-3">
-                    <a id="modal-game-link" href="https://store.epicgames.com/" target="_blank" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-all">前往查看</a>
-                    <button onclick="closeModal()" class="w-full bg-transparent border border-slate-700 hover:bg-slate-800 text-slate-400 font-bold py-3 rounded-xl transition-all">关闭</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- ============================================================
-             🔥 错误提示弹窗
-             用于显示需要用户手动操作的错误（如 EULA 失败）
-             ============================================================ -->
-        <div id="error-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden">
-            <div class="modal-card border p-6 shadow-2xl max-w-md w-full text-center modal-enter relative mx-4">
-                <div id="error-modal-icon" class="w-16 h-16 bg-amber-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <span class="text-3xl">⚠️</span>
-                </div>
-                <h3 id="error-modal-title" class="text-xl font-bold text-white mb-2">需要您帮忙操作一下</h3>
-                <div id="error-modal-content" class="bg-slate-800 rounded-xl p-4 mb-4 text-left">
-                    <p id="error-modal-desc" class="text-slate-300 text-sm leading-relaxed">
-                        这个账号需要先同意 Epic 的服务协议，系统自动处理失败了。
-                    </p>
-                    <div id="error-modal-steps" class="mt-4 space-y-3 text-sm text-slate-300">
-                        <p class="font-semibold text-white">请按以下步骤操作：</p>
-                        <ol class="list-decimal list-inside space-y-2">
-                            <li>打开 <a href="https://www.epicgames.com" target="_blank" class="text-blue-400 hover:text-blue-300 underline">Epic 官网</a> 并登录</li>
-                            <li>如果看到"服务协议"或"EULA"页面，点击"接受"按钮</li>
-                            <li>完成后回来重新点击"托管"按钮</li>
-                        </ol>
-                    </div>
-                </div>
-                <div class="flex flex-col gap-3">
-                    <a href="https://www.epicgames.com" target="_blank" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2">
-                        <span>前往 Epic 官网</span>
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-                    </a>
-                    <button onclick="closeErrorModal()" class="w-full bg-transparent border border-slate-700 hover:bg-slate-800 text-slate-400 font-bold py-3 rounded-xl transition-all">我知道了</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- 页脚 -->
-        <footer class="w-full mt-8 pt-5 border-t border-slate-800 fade-in" style="animation-delay: 0.2s;">
-            <div class="flex flex-col md:flex-row justify-between items-center gap-4">
-                <div class="text-center md:text-left">
-                    <a href="https://github.com/10000ge10000/epic-kiosk" target="_blank" class="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors">
-                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-                        <span>10000ge10000/epic-kiosk</span>
-                    </a>
-                </div>
-                <div class="flex items-center gap-5">
-                    <a href="https://space.bilibili.com/59438380" target="_blank" class="text-slate-500 hover:text-blue-400 transition-colors" title="Bilibili"><svg class="footer-icon" fill="currentColor" viewBox="0 0 24 24"><path d="M17.813 4.653h.854c1.51.054 2.769.578 3.773 1.574 1.004.995 1.524 2.249 1.56 3.758v6.844c-.036 1.51-.556 2.769-1.56 3.773-1.004.996-2.264 1.52-3.773 1.574h-12.714c-1.51-.054-2.769-.578-3.773-1.574-1.004-.995-1.524-2.249-1.56-3.758v-6.844c.036-1.51.556-2.769 1.56-3.773 1.004-.996 2.264-1.52 3.773-1.574h.776l-1.175-1.12a.9.9 0 0 1-.272-.649c0-.271.095-.504.285-.698.19-.194.425-.291.704-.291.278 0 .515.097.71.291l1.896 1.796h5.812l1.896-1.796c.195-.194.432-.291.711-.291.279 0 .514.097.704.291.19.194.285.427.285.698 0 .271-.091.488-.272.649l-1.175 1.12zm-12.876 2.227c-.896.031-1.642.344-2.234.936-.593.593-.902 1.334-.928 2.222v6.864c.026.889.335 1.629.928 2.222.592.593 1.338.905 2.234.936h13.068c.896-.031 1.642-.344 2.234-.936.593-.593.902-1.334.928-2.222v-6.864c-.026-.889-.335-1.629-.928-2.222-.592-.593-1.338-.905-2.234-.936h-13.068z"/></svg></a>
-                    <a href="https://www.youtube.com/channel/UCqgvZnCN9-9pZcL4SWxmnDw" target="_blank" class="text-slate-500 hover:text-red-500 transition-colors" title="YouTube"><svg class="footer-icon" fill="currentColor" viewBox="0 0 24 24"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg></a>
-                    <a href="https://github.com/10000ge10000" target="_blank" class="text-slate-500 hover:text-white transition-colors" title="GitHub"><svg class="footer-icon" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg></a>
-                    <a href="https://blog.910501.xyz/" target="_blank" class="text-slate-500 hover:text-emerald-400 transition-colors" title="Blog"><svg class="footer-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg></a>
-                </div>
-            </div>
+            <div class="footer-bottom"><p class="footer-status"><span class="footer-status-dot" aria-hidden="true"></span>服务状态与实时日志始终在控制台可见</p><p class="footer-copyright">EPIC AUTOPILOT · 2026</p></div>
         </footer>
     </div>
 
+    <div id="success-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="success-modal-title" aria-describedby="success-modal-desc"><div class="modal-card" tabindex="-1"><div class="modal-icon"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 13 4 4L19 7"></path></svg></div><h3 id="success-modal-title">领取成功</h3><p id="success-modal-desc">游戏已确认加入该账号资产。</p><div class="modal-details"><span class="field-hint">本次新增资产</span><strong id="modal-game-name">Unknown Game</strong></div><div class="modal-actions"><a id="modal-game-link" class="btn btn-primary" href="https://store.epicgames.com/" target="_blank" rel="noopener noreferrer">前往 Epic 商店查看</a><button type="button" class="btn btn-secondary" onclick="closeModal()">关闭</button></div></div></div>
+    <div id="error-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="error-modal-title" aria-describedby="error-modal-desc"><div class="modal-card" tabindex="-1"><div id="error-modal-icon" class="modal-icon is-warning"></div><h3 id="error-modal-title">需要您帮忙操作一下</h3><div class="modal-details"><p id="error-modal-desc">这个账号需要先完成 Epic 的必要操作。</p><div id="error-modal-steps"><p class="field-label" style="margin-top:14px">请按以下步骤操作：</p><ol><li>打开 <a href="https://www.epicgames.com" target="_blank" rel="noopener noreferrer">Epic 官网</a> 并登录。</li><li>按页面提示完成服务协议、解锁或验证码等操作。</li><li>完成后返回控制台重新提交托管。</li></ol></div></div><div class="modal-actions"><a class="btn btn-primary" href="https://www.epicgames.com" target="_blank" rel="noopener noreferrer">前往 Epic 官网</a><button type="button" class="btn btn-secondary" onclick="closeErrorModal()">我知道了</button></div></div></div>
+
     <script>
         {% raw %}
-        // 初始化
-        document.addEventListener('DOMContentLoaded', () => {
-            loadRememberedEmail();
-            fetchSystemStats();
-            setInterval(fetchSystemStats, 30000);
-
-            // 隐藏加载遮罩（延迟确保 Tailwind 已加载）
-            setTimeout(() => {
-                const loader = document.getElementById('page-loader');
-                if (loader) {
-                    loader.classList.add('fade-out');
-                    setTimeout(() => loader.remove(), 300);
-                }
-            }, 100);
-        });
-
-        // Toast
-        function closeAnnouncement() {
-            const bar = document.getElementById('announcement-bar');
-            bar.style.transition = 'opacity 0.3s, transform 0.3s';
-            bar.style.opacity = '0';
-            bar.style.transform = 'translateY(-100%)';
-            setTimeout(() => bar.style.display = 'none', 300);
-        }
-
-        function showToast(message, type = 'info', duration = 4000) {
-            const container = document.getElementById('toast-container');
-            const toast = document.createElement('div');
-            toast.className = `toast toast-${type}`;
-            const icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
-            const icon = document.createElement('span');
-            icon.className = 'text-lg';
-            icon.textContent = icons[type] || icons.info;
-            const text = document.createElement('span');
-            text.textContent = String(message);
-            toast.append(icon, text);
-            container.appendChild(toast);
-            setTimeout(() => { toast.classList.add('hiding'); setTimeout(() => toast.remove(), 250); }, duration);
-        }
-
-        function escapeHtml(value) {
-            return String(value ?? '')
-                .replaceAll('&', '&amp;')
-                .replaceAll('<', '&lt;')
-                .replaceAll('>', '&gt;')
-                .replaceAll('"', '&quot;')
-                .replaceAll("'", '&#039;');
-        }
-
-        function safeHttpUrl(value, fallback = '') {
-            try {
-                const url = new URL(String(value), window.location.origin);
-                return ['http:', 'https:'].includes(url.protocol) ? url.href : fallback;
-            } catch {
-                return fallback;
-            }
-        }
-
-        // 记住邮箱
-        function loadRememberedEmail() {
-            const saved = localStorage.getItem('remembered_email'), checked = localStorage.getItem('remember_email_checked');
-            if (saved && checked === 'true') {
-                document.getElementById('d_email').value = saved;
-                document.getElementById('q_email').value = saved;
-                document.getElementById('remember_email').checked = true;
-            }
-        }
-        function saveRememberedEmail(email) {
-            const shouldRemember = document.getElementById('remember_email').checked;
-            if (shouldRemember && email) { localStorage.setItem('remembered_email', email); localStorage.setItem('remember_email_checked', 'true'); }
-            else if (!shouldRemember) { localStorage.removeItem('remembered_email'); localStorage.setItem('remember_email_checked', 'false'); }
-        }
-
-        // 系统状态
-        async function fetchSystemStats() {
-            try {
-                const res = await axios.get('/api/system_stats');
-                // 账号显示格式: 已验证数/总数 (如: 33/27 → 27/27)
-                const verified = res.data.verified_accounts || 0;
-                const total = res.data.total_accounts || 0;
-                document.getElementById('stat-accounts').textContent = `${verified}/${total}`;
-                document.getElementById('stat-today').textContent = res.data.today_claims;
-                document.getElementById('stat-total').textContent = res.data.total_claims;
-                // 队列任务数 = 等待中 + 处理中
-                const queueTotal = (res.data.queue_length || 0) + (res.data.processing_count || 0);
-                document.getElementById('stat-queue').textContent = queueTotal;
-            } catch (e) { console.error('Failed to fetch stats:', e); }
-        }
-
-        // Tab 切换
-        function switchTab(tab) {
-            ['deposit', 'query', 'free-games'].forEach(t => document.getElementById('view-' + t).classList.add('hidden'));
-            ['deposit', 'query', 'free-games'].forEach(t => {
-                const btn = document.getElementById('tab-' + t);
-                if (tab === t) {
-                    btn.className = 'tab-btn tab-btn-active';
-                } else {
-                    btn.className = 'tab-btn tab-btn-inactive';
-                }
-            });
-            document.getElementById('stats-section').classList.toggle('hidden', tab !== 'deposit');
-            document.getElementById('view-' + tab).classList.remove('hidden');
-            if (tab === 'free-games') fetchFreeGames();
-        }
-
-        // 免费游戏 - 更大的封面
-        async function fetchFreeGames() {
-            const skeleton = document.getElementById('free-games-skeleton'), grid = document.getElementById('free-games-grid'), empty = document.getElementById('free-games-empty');
-            skeleton.classList.remove('hidden'); grid.classList.add('hidden'); empty.classList.add('hidden');
-            try {
-                const res = await axios.get('/api/free_games');
-                skeleton.classList.add('hidden');
-                if (res.data.data.length === 0 || (res.data.data.length === 1 && !res.data.data[0].slug)) { empty.classList.remove('hidden'); return; }
-                grid.innerHTML = res.data.data.map(game => {
-                    const gameUrl = safeHttpUrl(game.url, 'https://store.epicgames.com/zh-CN/free-games');
-                    const imageUrl = safeHttpUrl(game.image);
-                    const title = escapeHtml(game.title);
-                    return `
-                    <a href="${escapeHtml(gameUrl)}" target="_blank" rel="noopener noreferrer" class="free-game-card glass-panel rounded-2xl overflow-hidden block">
-                        <div class="aspect-[16/9] relative overflow-hidden bg-slate-800">
-                            ${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="${title}" class="w-full h-full object-cover hover:scale-105 transition-transform duration-500" onerror="this.remove()">` : '<div class="w-full h-full flex items-center justify-center text-5xl">🎮</div>'}
-                        </div>
-                        <div class="p-4">
-                            <h4 class="font-bold text-white text-lg mb-1 truncate">${title}</h4>
-                            <p class="text-sm text-green-400 font-semibold">限时免费领取</p>
-                        </div>
-                    </a>
-                `}).join('');
-                grid.classList.remove('hidden');
-            } catch (e) { skeleton.classList.add('hidden'); empty.classList.remove('hidden'); showToast('获取免费游戏失败', 'error'); }
-        }
-
-        // Axios 拦截器
-        axios.interceptors.response.use(response => response, error => {
-            if (error.response && error.response.status === 403) showToast(error.response.data.msg || "IP 已被封禁", 'error');
-            return Promise.reject(error);
-        });
-
-        function togglePwd(id, btn) {
-            const el = document.getElementById(id);
-            const reveal = el.type === 'password';
-            el.type = reveal ? 'text' : 'password';
-            btn.title = reveal ? '隐藏密码' : '显示密码';
-            btn.setAttribute('aria-label', btn.title);
-        }
-
-        // 自动驾驶
-        let pollTimer;
+        let pollTimer = null;
         let activeTask = null;
         let accountAccessToken = '';
-        async function startVerify() {
-            const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
-            if (!email || !password) { showToast('请输入邮箱和密码', 'warning'); return; }
-            saveRememberedEmail(email);
-
-            // 🎬 触发工作区动画：移至左侧，显示日志面板
-            document.getElementById('work-area-container').classList.add('is-working');
-            document.getElementById('status-panel-wrapper').classList.add('is-visible');
-            document.getElementById('deposit-form').classList.add('opacity-50', 'pointer-events-none');
-            document.getElementById('task-summary-text').textContent = '正在提交账号并准备浏览器环境。';
-
-            try {
-                const res = await axios.post('/api/deposit', { email, password });
-                if (res.data.status !== 'queued') {
-                    const type = res.data.status === 'busy' ? 'warning' : 'error';
-                    showToast(res.data.msg, type);
-                    document.getElementById('status-log').innerText = `> ${res.data.msg}`;
-                    resetUI();
-                    return;
-                }
-                activeTask = { id: res.data.task_id, token: res.data.access_token };
-                document.getElementById('d_password').value = '';
-                showToast(res.data.msg, 'success');
-                document.getElementById('status-log').innerText = `> ${res.data.msg}`;
-                pollTimer = setInterval(checkStatus, 1500);
-            } catch (e) {
-                showToast(e.response?.data?.msg || '任务提交失败', 'error');
-                resetUI();
-            }
-        }
-
-        async function deleteAccount() {
-            const email = document.getElementById('d_email').value, password = document.getElementById('d_password').value;
-            if (!email || !password) { showToast('请输入账号密码确认身份', 'warning'); return; }
-            if (!confirm('确定停止托管并删除该账号的本地登录信息吗？此操作不会删除 Epic 账号，但需要重新提交密码才能再次托管。')) return;
-            try {
-                const session = await axios.post('/api/session', { email, password });
-                const token = session.data.access_token;
-                const res = await axios.post('/api/delete_account', {}, { headers: { Authorization: `Bearer ${token}` } });
-                showToast(res.data.msg, res.data.status === 'success' ? 'success' : 'error');
-                if (res.data.status === 'success') { document.getElementById('d_email').value = ''; document.getElementById('d_password').value = ''; localStorage.removeItem('remembered_email'); document.getElementById('remember_email').checked = false; }
-            } catch (e) { showToast('删除失败', 'error'); }
-        }
-
-        async function checkStatus() {
-            if (!activeTask) return;
-            try {
-                const res = await axios.get('/api/tasks/' + encodeURIComponent(activeTask.id), {
-                    headers: { Authorization: `Bearer ${activeTask.token}` }
-                });
-                const logDiv = document.getElementById('status-log');
-                const newLine = `\n> ${res.data.msg}`;
-                if (!logDiv.innerText.includes(res.data.msg)) logDiv.innerText = newLine + logDiv.innerText;
-                document.getElementById('task-summary-text').textContent = res.data.msg;
-
-                const result = res.data.status;
-
-                // ============================================================
-                // 🔥 错误类型处理
-                // 根据不同的 result 类型展示不同的弹窗
-                // ============================================================
-
-                // 成功领取新游戏
-                if (result === 'succeeded') {
-                    clearInterval(pollTimer);
-                    try {
-                        const confirmation = await axios.post('/api/confirm_success', { task_id: activeTask.id }, {
-                            headers: { Authorization: `Bearer ${activeTask.token}` }
-                        });
-                        accountAccessToken = confirmation.data.access_token;
-                        showModal(res.data.game_title || "Epic Free Game");
-                        showToast('任务完成！', 'success', 4000);
-                    } catch {
-                        showToast('领取成功，但账号保存失败，请重新提交一次', 'warning', 6000);
-                    }
-                    resetUI(); fetchSystemStats();
-                }
-                // ============================================================
-                // 🔥 错误类型：需要用户手动操作
-                // ============================================================
-                else if (result === 'manual_required') {
-                    clearInterval(pollTimer);
-                    showErrorModal(res.data.error_type || 'captcha_unsolved', res.data.hint);
-                    resetUI();
-                }
-                // 通用失败
-                else if (result === 'failed') {
-                    clearInterval(pollTimer);
-                    showErrorModal(res.data.error_type || 'unknown', res.data.hint);
-                    resetUI();
-                }
-            } catch (e) {
-                if ([401, 404, 410].includes(e.response?.status)) {
-                    clearInterval(pollTimer);
-                    showToast('任务会话已失效，请刷新后重试', 'error');
-                    resetUI();
-                }
-            }
-        }
-
-        function resetUI() {
-            if (pollTimer) {
-                clearInterval(pollTimer);
-                pollTimer = null;
-            }
-            activeTask = null;
-            document.getElementById('deposit-form').classList.remove('opacity-50', 'pointer-events-none');
-            document.getElementById('btn-deposit').innerHTML = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5v14l11-7z"></path></svg><span>启动引擎</span>';
-            // 🎬 恢复布局：工作区居中，隐藏日志面板
-            document.getElementById('work-area-container').classList.remove('is-working');
-            document.getElementById('status-panel-wrapper').classList.remove('is-visible');
-            document.getElementById('task-summary-text').textContent = '暂无运行中的任务。启动后会在这里显示关键进度。';
-        }
-
-        function showModal(gameName) {
-            document.getElementById('modal-game-name').innerText = gameName;
-            document.getElementById('modal-game-link').href = `https://store.epicgames.com/zh-CN/browse?q=${encodeURIComponent(gameName)}&sortBy=relevancy`;
-            document.getElementById('success-modal').classList.remove('hidden');
-        }
-
-        function closeModal() {
-            document.getElementById('success-modal').classList.add('hidden');
-            switchTab('query');
-            if (document.getElementById('d_email').value) { document.getElementById('q_email').value = document.getElementById('d_email').value; doQuery(); }
-        }
-
-        // ============================================================
-        // 🔥 错误提示弹窗相关函数
-        // 根据不同的错误类型显示不同的提示内容
-        // ============================================================
-
-        // 错误类型配置：标题、描述、图标
+        let lastModalFocus = null;
+        let activeModal = null;
+        const START_BUTTON_HTML = '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9" d="M8 5v14l11-7z"></path></svg><span>启动引擎</span>';
         const ERROR_CONFIGS = {
-            'eula_failed': {
-                title: '需要您帮忙操作一下',
-                desc: '这个账号需要先同意 Epic 的服务协议，系统自动处理失败了。',
-                showSteps: true,
-                icon: '⚠️',
-                iconBg: 'bg-amber-500/20'
-            },
-            'invalid_credentials': {
-                title: '密码错误',
-                desc: '您输入的邮箱或密码不正确，请检查后重新提交。',
-                showSteps: false,
-                icon: '❌',
-                iconBg: 'bg-red-500/20'
-            },
-            'account_locked': {
-                title: '账号被锁定',
-                desc: '该 Epic 账号已被锁定，请登录 Epic 官网解锁后再试。',
-                showSteps: true,
-                icon: '🔒',
-                iconBg: 'bg-red-500/20'
-            },
-            'captcha_failed': {
-                title: '验证码识别困难',
-                desc: '系统暂时无法稳定通过验证码，已停止本次操作，稍后可以重新尝试。',
-                showSteps: false,
-                icon: '!',
-                iconBg: 'bg-amber-500/20'
-            },
-            'captcha_manual_required': {
-                title: '需要人工完成验证码',
-                desc: 'Epic 触发了 hCaptcha 动物拖拽题。系统已停止自动重试，避免继续触发风控；请联系管理员人工完成一次登录后再重试。',
-                showSteps: true,
-                icon: '🧩',
-                iconBg: 'bg-amber-500/20'
-            },
-            'checkout_failed': {
-                title: '暂时无法确认领取结果',
-                desc: '验证码已经通过，但系统没有获得明确的入库结果。为避免误报成功，本次任务已停止，请稍后重试并检查 Epic 游戏库。',
-                showSteps: false,
-                icon: '!',
-                iconBg: 'bg-amber-500/20'
-            },
-            'unknown_error': {
-                title: '本次领取没有完成',
-                desc: '系统未能确认游戏已经入库。账号托管信息不会因此删除，请稍后再试。',
-                showSteps: false,
-                icon: '!',
-                iconBg: 'bg-amber-500/20'
-            },
-            'login_timeout': {
-                title: '登录超时',
-                desc: '网络波动导致登录超时，请稍后重试。',
-                showSteps: false,
-                icon: '⏰',
-                iconBg: 'bg-blue-500/20'
-            },
-            'network_timeout': {
-                title: '网络连接超时',
-                desc: 'Epic 服务可能暂时不可用，请稍后重试。',
-                showSteps: false,
-                icon: '🌐',
-                iconBg: 'bg-blue-500/20'
-            },
-            'cookie_invalid': {
-                title: '登录已过期',
-                desc: '您的登录状态已过期，请重新托管账号。',
-                showSteps: false,
-                icon: '🔑',
-                iconBg: 'bg-amber-500/20'
-            },
-            'unknown': {
-                title: '未知错误',
-                desc: '系统遇到了未知错误，请联系管理员查看日志。',
-                showSteps: false,
-                icon: '❓',
-                iconBg: 'bg-slate-500/20'
-            }
+            eula_failed: { title:'需要您帮忙操作一下', desc:'这个账号需要先同意 Epic 的服务协议，系统自动处理失败了。', steps:true, icon:'info', tone:'warning' },
+            invalid_credentials: { title:'密码错误', desc:'您输入的邮箱或密码不正确，请检查后重新提交。', steps:false, icon:'x', tone:'danger' },
+            account_locked: { title:'账号被锁定', desc:'该 Epic 账号已被锁定，请登录 Epic 官网解锁后再试。', steps:true, icon:'lock', tone:'danger' },
+            captcha_failed: { title:'验证码识别困难', desc:'系统暂时无法稳定通过验证码，已停止本次操作，稍后可以重新尝试。', steps:false, icon:'warning', tone:'warning' },
+            captcha_manual_required: { title:'需要人工完成验证码', desc:'Epic 触发了需要人工处理的验证码。系统已停止自动重试，避免继续触发风控；请联系管理员完成一次登录后再试。', steps:true, icon:'warning', tone:'warning' },
+            checkout_failed: { title:'暂时无法确认领取结果', desc:'验证码已经通过，但系统没有获得明确的入库结果。为避免误报成功，本次任务已停止，请稍后重试并检查 Epic 游戏库。', steps:false, icon:'warning', tone:'warning' },
+            unknown_error: { title:'本次领取没有完成', desc:'系统未能确认游戏已经入库。账号托管信息不会因此删除，请稍后再试。', steps:false, icon:'warning', tone:'warning' },
+            login_timeout: { title:'登录超时', desc:'网络波动导致登录超时，请稍后重试。', steps:false, icon:'clock', tone:'warning' },
+            network_timeout: { title:'网络连接超时', desc:'Epic 服务可能暂时不可用，请稍后重试。', steps:false, icon:'clock', tone:'warning' },
+            cookie_invalid: { title:'登录已过期', desc:'您的登录状态已过期，请重新托管账号。', steps:false, icon:'key', tone:'warning' },
+            unknown: { title:'未知错误', desc:'系统遇到了未知错误，请联系管理员查看日志。', steps:false, icon:'warning', tone:'warning' }
         };
+        const ICONS = { info:'<circle cx="12" cy="12" r="9"></circle><path d="M12 10v5m0-8h.01"></path>', x:'<circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6m0-6-6 6"></path>', lock:'<rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path>', warning:'<path d="M12 3 2.8 19a1.5 1.5 0 0 0 1.3 2h15.8a1.5 1.5 0 0 0 1.3-2L12 3Z"></path><path d="M12 9v4m0 3h.01"></path>', clock:'<circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>', key:'<circle cx="8" cy="15" r="3"></circle><path d="m10.5 12.5 7-7m-2 0 2 2m-5 1 2 2"></path>' };
 
-        function showErrorModal(errorType, hint) {
-            const config = ERROR_CONFIGS[errorType] || ERROR_CONFIGS['unknown'];
+        document.addEventListener('DOMContentLoaded', () => {
+            loadRememberedEmail(); fetchSystemStats(); window.setInterval(fetchSystemStats, 30000);
+            document.getElementById('success-modal').addEventListener('click', event => { if (event.target.id === 'success-modal') closeModal(); });
+            document.addEventListener('keydown', handleGlobalKeydown);
+            document.querySelector('.nav-tabs').addEventListener('keydown', event => {
+                if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+                event.preventDefault(); const tabs = [...document.querySelectorAll('[role="tab"]')]; const current = tabs.indexOf(document.activeElement); let next = current;
+                if (event.key === 'ArrowRight') next = (current + 1) % tabs.length; if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length; if (event.key === 'Home') next = 0; if (event.key === 'End') next = tabs.length - 1;
+                tabs[next].focus(); tabs[next].click();
+            });
+            window.setTimeout(() => document.getElementById('page-loader')?.classList.add('fade-out'), 80);
+        });
 
-            // 更新弹窗内容
-            document.getElementById('error-modal-title').textContent = config.title;
-            document.getElementById('error-modal-desc').textContent = hint || config.desc;
-
-            // 更新图标
-            const iconDiv = document.getElementById('error-modal-icon');
-            iconDiv.className = `w-16 h-16 ${config.iconBg} rounded-full flex items-center justify-center mx-auto mb-4`;
-            iconDiv.innerHTML = `<span class="text-3xl">${config.icon}</span>`;
-
-            // 显示/隐藏操作步骤
-            const stepsDiv = document.getElementById('error-modal-steps');
-            if (config.showSteps) {
-                stepsDiv.classList.remove('hidden');
-            } else {
-                stepsDiv.classList.add('hidden');
-            }
-
-            // 显示弹窗
-            document.getElementById('error-modal').classList.remove('hidden');
-        }
-
-        function closeErrorModal() {
-            document.getElementById('error-modal').classList.add('hidden');
-        }
-
-        // 资产查询 - 更大的卡片
-        async function doQuery() {
-            const email = document.getElementById('q_email').value, password = document.getElementById('q_password').value, btn = document.getElementById('btn-query');
-            if (!email || (!password && !accountAccessToken)) { showToast('请输入邮箱和密码', 'warning'); return; }
-            btn.disabled = true; btn.innerText = "...";
-            document.getElementById('skeleton-grid').classList.remove('hidden');
-            document.getElementById('query-result-area').classList.add('hidden');
-            try {
-                if (!accountAccessToken) {
-                    const session = await axios.post('/api/session', { email, password });
-                    accountAccessToken = session.data.access_token;
-                    document.getElementById('q_password').value = '';
-                }
-                const res = await axios.post('/api/query', {}, {
-                    headers: { Authorization: `Bearer ${accountAccessToken}` }
-                });
-                document.getElementById('skeleton-grid').classList.add('hidden');
-                if (res.data.status === 'success') {
-                    const logs = res.data.data, grid = document.getElementById('games-grid');
-                    grid.innerHTML = '';
-                    document.getElementById('query-result-area').classList.remove('hidden');
-                    document.getElementById('log-count').innerText = logs.length;
-                    if (logs.length === 0) { document.getElementById('empty-msg').classList.remove('hidden'); }
-                    else {
-                        document.getElementById('empty-msg').classList.add('hidden');
-                        logs.forEach(log => {
-                            const game = escapeHtml(log.game);
-                            const image = safeHttpUrl(log.image, '/images/default.jpg');
-                            const date = escapeHtml(String(log.time || '').split(' ')[0]);
-                            grid.innerHTML += `
-                                <a href="https://store.epicgames.com/zh-CN/browse?q=${encodeURIComponent(log.game)}&sortBy=relevancy" target="_blank" rel="noopener noreferrer" class="game-card group relative bg-slate-800 rounded-xl overflow-hidden border border-slate-700 cursor-pointer block">
-                                    <div class="aspect-[3/4] relative overflow-hidden">
-                                        <img src="${escapeHtml(image)}" alt="${game}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110 opacity-80 group-hover:opacity-100" onerror="this.remove()">
-                                        <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent opacity-90"></div>
-                                        <div class="absolute bottom-3 left-3 right-3">
-                                            <div class="text-xs font-mono text-green-400 mb-1 flex items-center"><span class="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>${date}</div>
-                                            <h4 class="text-white font-bold text-sm leading-tight line-clamp-2">${game}</h4>
-                                        </div>
-                                    </div>
-                                </a>`;
-                        });
-                    }
-                    showToast(`找到 ${logs.length} 个游戏`, 'success');
-                }
-            } catch (e) { showToast('查询失败', 'error'); document.getElementById('skeleton-grid').classList.add('hidden'); }
-            finally { btn.disabled = false; btn.innerText = "检索"; }
-        }
+        function closeAnnouncement() { const bar = document.getElementById('announcement-bar'); if (!bar) return; bar.classList.add('is-closing'); window.setTimeout(() => { bar.hidden = true; }, 180); }
+        function showToast(message, type = 'info', duration = 4000) { const container = document.getElementById('toast-container'); const toast = document.createElement('div'); toast.className = `toast toast-${type}`; toast.setAttribute('role', type === 'error' ? 'alert' : 'status'); toast.innerHTML = '<span class="toast-marker" aria-hidden="true"></span>'; const text = document.createElement('span'); text.textContent = String(message); const close = document.createElement('button'); close.type='button'; close.className='toast-close'; close.setAttribute('aria-label','关闭提示'); close.innerHTML='&times;'; close.addEventListener('click', () => dismissToast(toast)); toast.append(text, close); container.append(toast); window.setTimeout(() => dismissToast(toast), duration); }
+        function dismissToast(toast) { if (!toast || !toast.isConnected) return; toast.classList.add('hiding'); window.setTimeout(() => toast.remove(), 180); }
+        function escapeHtml(value) { return String(value ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;'); }
+        function safeHttpUrl(value, fallback = '') { try { const url = new URL(String(value), window.location.origin); return ['http:','https:'].includes(url.protocol) ? url.href : fallback; } catch { return fallback; } }
+        function loadRememberedEmail() { const email = localStorage.getItem('remembered_email'); if (email && localStorage.getItem('remember_email_checked') === 'true') { document.getElementById('d_email').value=email; document.getElementById('q_email').value=email; document.getElementById('remember_email').checked=true; } }
+        function saveRememberedEmail(email) { const remember = document.getElementById('remember_email').checked; if (remember && email) { localStorage.setItem('remembered_email', email); localStorage.setItem('remember_email_checked','true'); } else if (!remember) { localStorage.removeItem('remembered_email'); localStorage.setItem('remember_email_checked','false'); } }
+        function setServiceState(state, label) { const el = document.getElementById('service-status'); if (!el) return; el.className = `header-utility service-state ${state === 'unavailable' ? 'is-unavailable' : state === 'checking' ? 'is-checking' : ''}`; el.lastElementChild.textContent=label; }
+        async function fetchSystemStats() { try { const res = await axios.get('/api/system_stats'); const data=res.data; document.getElementById('stat-accounts').textContent=`${data.verified_accounts || 0}/${data.total_accounts || 0}`; document.getElementById('stat-today').textContent=data.today_claims ?? 0; document.getElementById('stat-total').textContent=data.total_claims ?? 0; document.getElementById('stat-queue').textContent=(data.queue_length || 0) + (data.processing_count || 0); setServiceState('online','服务状态正常'); } catch (error) { console.error('Failed to fetch stats:', error); setServiceState('unavailable','服务状态暂不可用'); } }
+        function switchTab(tab) { ['deposit','query','free-games'].forEach(name => { const active=name===tab; const view=document.getElementById(`view-${name}`); const button=document.getElementById(`tab-${name}`); view.classList.toggle('hidden',!active); button.className=`tab-btn ${active ? 'tab-btn-active' : 'tab-btn-inactive'}`; button.setAttribute('aria-selected',String(active)); button.tabIndex=active?0:-1; }); document.getElementById('stats-section').classList.toggle('hidden',tab !== 'deposit'); if (tab === 'free-games') fetchFreeGames(); }
+        function formatPromotionEnd(value) { if (!value) return '促销时间以 Epic 商店为准'; const date=new Date(value); return Number.isNaN(date.getTime()) ? '促销时间以 Epic 商店为准' : `截至 ${date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}`; }
+        function fallbackCover() { return '<div class="cover-fallback" aria-hidden="true"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M8 12h.01M16 12h.01M7 18h10a4 4 0 0 0 4-4v-2a4 4 0 0 0-4-4h-1l-1-2H9L8 8H7a4 4 0 0 0-4 4v2a4 4 0 0 0 4 4Z"></path><path d="M8 12h3m-1.5-1.5v3"></path></svg></div>'; }
+        async function fetchFreeGames() { const skeleton=document.getElementById('free-games-skeleton'); const grid=document.getElementById('free-games-grid'); const empty=document.getElementById('free-games-empty'); skeleton.classList.remove('hidden'); grid.classList.add('hidden'); empty.classList.add('hidden'); try { const res=await axios.get('/api/free_games'); const games=Array.isArray(res.data.data) ? res.data.data : []; skeleton.classList.add('hidden'); if (!games.length || (games.length===1 && !games[0].slug)) { empty.classList.remove('hidden'); return; } grid.innerHTML=games.map(game => { const url=safeHttpUrl(game.url,'https://store.epicgames.com/zh-CN/free-games'); const image=safeHttpUrl(game.image); const title=escapeHtml(game.title || '未知游戏'); return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="free-game-card" aria-label="前往 Epic 商店查看 ${title}"><div class="free-cover">${image ? `<img src="${escapeHtml(image)}" alt="${title}" loading="lazy" onerror="this.replaceWith(document.createRange().createContextualFragment(fallbackCover()))">` : fallbackCover()}</div><div class="game-info"><span class="free-badge">本周免费</span><h3 class="game-name">${title}</h3><p class="free-description">${escapeHtml(game.description || 'Epic Games Store 限时促销')}</p><span class="game-meta"><span class="state-dot" aria-hidden="true"></span>${escapeHtml(formatPromotionEnd(game.promotion_end))}</span></div></a>`; }).join(''); grid.classList.remove('hidden'); } catch (error) { skeleton.classList.add('hidden'); empty.classList.remove('hidden'); showToast('获取免费游戏失败','error'); } }
+        axios.interceptors.response.use(response => response, error => { if (error.response?.status === 403) showToast(error.response.data.msg || 'IP 已被封禁','error'); return Promise.reject(error); });
+        function togglePwd(id, button) { const input=document.getElementById(id); const reveal=input.type==='password'; input.type=reveal?'text':'password'; button.title=reveal?'隐藏密码':'显示密码'; button.setAttribute('aria-label',button.title); }
+        function updateTaskSteps(message, result='') { const text=String(message || '').toLowerCase(); let current=1; if (/(验证|登录|验证码|captcha|browser)/.test(text)) current=2; if (/(领取|保存|入库|claim|succeed)/.test(text)) current=3; document.querySelectorAll('.task-step').forEach(step => { const index=Number(step.dataset.step); step.classList.toggle('is-active',index===current && !['failed','manual_required'].includes(result)); step.classList.toggle('is-complete',index<current || (result==='succeeded' && index<=current)); }); }
+        function setDepositBusy(busy) { const form=document.getElementById('deposit-form'); const button=document.getElementById('btn-deposit'); form.classList.toggle('is-busy',busy); form.querySelectorAll('input,button').forEach(el => { el.disabled=busy; }); button.setAttribute('aria-busy',String(busy)); button.innerHTML=busy ? '<span class="loader-mark" style="width:16px;height:16px;border-width:2px"></span><span>正在启动…</span>' : START_BUTTON_HTML; }
+        async function startVerify() { const email=document.getElementById('d_email').value; const password=document.getElementById('d_password').value; if (!email || !password) { showToast('请输入邮箱和密码','warning'); return; } saveRememberedEmail(email); setDepositBusy(true); document.getElementById('task-summary-text').textContent='正在提交账号并准备浏览器环境。'; document.getElementById('status-log').textContent='> 正在提交账号并准备浏览器环境。'; updateTaskSteps('提交账号'); try { const res=await axios.post('/api/deposit',{email,password}); if (res.data.status !== 'queued') { showToast(res.data.msg,res.data.status==='busy'?'warning':'error'); document.getElementById('status-log').textContent=`> ${res.data.msg}`; resetUI(); return; } activeTask={id:res.data.task_id,token:res.data.access_token}; document.getElementById('d_password').value=''; showToast(res.data.msg,'success'); document.getElementById('status-log').textContent=`> ${res.data.msg}`; pollTimer=window.setInterval(checkStatus,1500); checkStatus(); } catch (error) { showToast(error.response?.data?.msg || '任务提交失败','error'); resetUI(); } }
+        async function deleteAccount() { const email=document.getElementById('d_email').value; const password=document.getElementById('d_password').value; if (!email || !password) { showToast('请输入账号密码确认身份','warning'); return; } if (!window.confirm('确定停止托管并删除该账号的本地登录信息吗？此操作不会删除 Epic 账号，但需要重新提交密码才能再次托管。')) return; try { const session=await axios.post('/api/session',{email,password}); const res=await axios.post('/api/delete_account',{}, {headers:{Authorization:`Bearer ${session.data.access_token}`}}); showToast(res.data.msg,res.data.status==='success'?'success':'error'); if (res.data.status==='success') { document.getElementById('d_email').value=''; document.getElementById('d_password').value=''; localStorage.removeItem('remembered_email'); document.getElementById('remember_email').checked=false; fetchSystemStats(); } } catch { showToast('删除失败','error'); } }
+        async function checkStatus() { if (!activeTask) return; try { const res=await axios.get(`/api/tasks/${encodeURIComponent(activeTask.id)}`,{headers:{Authorization:`Bearer ${activeTask.token}`}}); const log=document.getElementById('status-log'); if (!log.textContent.includes(res.data.msg)) log.textContent=`> ${res.data.msg}\n${log.textContent}`; document.getElementById('task-summary-text').textContent=res.data.msg; updateTaskSteps(res.data.msg,res.data.status); if (res.data.status==='succeeded') { clearInterval(pollTimer); try { const confirmed=await axios.post('/api/confirm_success',{task_id:activeTask.id},{headers:{Authorization:`Bearer ${activeTask.token}`}}); accountAccessToken=confirmed.data.access_token; showModal(res.data.game_title || 'Epic Free Game'); showToast('任务完成！','success'); } catch { showToast('领取成功，但账号保存失败，请重新提交一次','warning',6000); } resetUI(); fetchSystemStats(); } else if (res.data.status==='manual_required' || res.data.status==='failed') { clearInterval(pollTimer); showErrorModal(res.data.error_type || (res.data.status==='failed'?'unknown':'captcha_manual_required'),res.data.hint); resetUI(); } } catch (error) { if ([401,404,410].includes(error.response?.status)) { clearInterval(pollTimer); showToast('任务会话已失效，请刷新后重试','error'); resetUI(); } } }
+        function clearTaskLog() { document.getElementById('status-log').textContent='准备就绪。'; }
+        function resetUI() { if (pollTimer) { clearInterval(pollTimer); pollTimer=null; } activeTask=null; setDepositBusy(false); document.getElementById('task-summary-text').textContent='暂无运行中的任务。启动后会在这里显示关键进度。'; updateTaskSteps('',''); }
+        function openModal(id) { const modal=document.getElementById(id); lastModalFocus=document.activeElement; activeModal=modal; modal.classList.remove('hidden'); window.setTimeout(() => modal.querySelector('.modal-card')?.focus(),0); }
+        function closeActiveModal(id) { const modal=document.getElementById(id); modal.classList.add('hidden'); if (activeModal===modal) activeModal=null; lastModalFocus?.focus?.(); }
+        function showModal(gameName) { document.getElementById('modal-game-name').textContent=gameName; document.getElementById('modal-game-link').href=`https://store.epicgames.com/zh-CN/browse?q=${encodeURIComponent(gameName)}&sortBy=relevancy`; openModal('success-modal'); }
+        function closeModal() { closeActiveModal('success-modal'); switchTab('query'); if (document.getElementById('d_email').value) { document.getElementById('q_email').value=document.getElementById('d_email').value; doQuery(); } }
+        function showErrorModal(errorType, hint) { const config=ERROR_CONFIGS[errorType] || ERROR_CONFIGS.unknown; document.getElementById('error-modal-title').textContent=config.title; document.getElementById('error-modal-desc').textContent=hint || config.desc; const icon=document.getElementById('error-modal-icon'); icon.className=`modal-icon ${config.tone==='danger'?'is-danger':'is-warning'}`; icon.innerHTML=`<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8">${ICONS[config.icon] || ICONS.warning}</svg>`; document.getElementById('error-modal-steps').classList.toggle('hidden',!config.steps); openModal('error-modal'); }
+        function closeErrorModal() { closeActiveModal('error-modal'); }
+        function handleGlobalKeydown(event) { if (!activeModal) return; if (event.key==='Escape') { event.preventDefault(); activeModal.id==='success-modal'?closeModal():closeErrorModal(); return; } if (event.key!=='Tab') return; const focusable=[...activeModal.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el => !el.hidden); if (!focusable.length) return; const first=focusable[0], last=focusable.at(-1); if (event.shiftKey && document.activeElement===first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement===last) { event.preventDefault(); first.focus(); } }
+        async function doQuery() { const email=document.getElementById('q_email').value; const password=document.getElementById('q_password').value; const button=document.getElementById('btn-query'); if (!email || (!password && !accountAccessToken)) { showToast('请输入邮箱和密码','warning'); return; } button.disabled=true; button.setAttribute('aria-busy','true'); button.textContent='正在打开资产库…'; document.getElementById('skeleton-grid').classList.remove('hidden'); document.getElementById('query-result-area').classList.add('hidden'); try { if (!accountAccessToken) { const session=await axios.post('/api/session',{email,password}); accountAccessToken=session.data.access_token; document.getElementById('q_password').value=''; } const res=await axios.post('/api/query',{}, {headers:{Authorization:`Bearer ${accountAccessToken}`}}); document.getElementById('skeleton-grid').classList.add('hidden'); if (res.data.status==='success') { const logs=Array.isArray(res.data.data)?res.data.data:[]; const grid=document.getElementById('games-grid'); document.getElementById('query-result-area').classList.remove('hidden'); document.getElementById('log-count').textContent=logs.length; document.getElementById('empty-msg').classList.toggle('hidden',logs.length!==0); grid.innerHTML=logs.map(log => { const title=escapeHtml(log.game || '未知游戏'); const image=safeHttpUrl(log.image); const date=escapeHtml(String(log.time || '').split(' ')[0] || '已记录'); const url=`https://store.epicgames.com/zh-CN/browse?q=${encodeURIComponent(log.game || '')}&sortBy=relevancy`; return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="game-card" aria-label="在 Epic 商店查看 ${title}"><div class="game-cover">${image?`<img src="${escapeHtml(image)}" alt="${title}" loading="lazy" onerror="this.replaceWith(document.createRange().createContextualFragment(fallbackCover()))">`:fallbackCover()}</div><div class="game-info"><h3 class="game-name">${title}</h3><span class="game-meta"><span class="state-dot" aria-hidden="true"></span>${date}</span></div></a>`; }).join(''); showToast(`找到 ${logs.length} 个游戏`,'success'); } } catch { showToast('查询失败','error'); document.getElementById('skeleton-grid').classList.add('hidden'); } finally { button.disabled=false; button.setAttribute('aria-busy','false'); button.textContent='打开资产库'; } }
         {% endraw %}
     </script>
 </body>
