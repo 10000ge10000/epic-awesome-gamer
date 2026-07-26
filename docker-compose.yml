@@ -26,6 +26,10 @@ services:
     image: redis@sha256:c5e375abb885e6b2021c0377879e4890bf76f9065b8922ffc113f2b226b9fc17
     container_name: epic-redis
     restart: always
+
+    # 容器 mem_limit 是 256m，但 redis 自己原本 maxmemory=0（无上限），
+    # 到限时会被内核 OOM Kill 而不是按策略拒写。noeviction 保证队列不被淘汰。
+    command: ["redis-server", "--maxmemory", "200mb", "--maxmemory-policy", "noeviction", "--save", "300", "10"]
     volumes:
       - ./data/redis:/data
     healthcheck:
@@ -98,6 +102,7 @@ services:
     image: zen-warp-multi:local
     container_name: epic-warp
     restart: always
+    init: true
     privileged: true
     environment:
       - WARP_INSTANCE_COUNT=10

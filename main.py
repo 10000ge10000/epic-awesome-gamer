@@ -44,7 +44,15 @@ from app.secure_store import (
     verify_account_password,
 )
 
-app = FastAPI()
+# 站点经反代对公网开放，交互式文档会把包含 /api/nuke_account、/api/admin/* 在内的
+# 完整内部 API 契约发布出去（这些端点虽有 token 保护，但没有公布 schema 的必要）。
+# 本地调试可用 EXPOSE_DOCS=1 临时打开。
+_EXPOSE_DOCS = os.getenv("EXPOSE_DOCS", "0") == "1"
+app = FastAPI(
+    docs_url="/docs" if _EXPOSE_DOCS else None,
+    redoc_url="/redoc" if _EXPOSE_DOCS else None,
+    openapi_url="/openapi.json" if _EXPOSE_DOCS else None,
+)
 templates = Jinja2Templates(directory="templates")
 
 # 1. 挂载与路径

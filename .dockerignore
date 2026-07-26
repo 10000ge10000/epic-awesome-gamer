@@ -62,3 +62,4 @@ tests/
 .pytest_cache/
 .coverage
 htmlcov/
+.codex-backups/
