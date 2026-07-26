@@ -89,6 +89,55 @@ class ProviderRouterTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(calls, ["primary.test"])
 
+    async def test_model_specific_4xx_falls_through_to_secondary(self):
+        """模型相关的 4xx 必须继续降级。
+
+        真实案例：GLM-4.5V 对尺寸不合规的图返回
+        400 "height(1) or width(1) must be larger than 28 for GLM VL models"，
+        而同一条链路上的 Kimi 模型能正常处理这张图。此前这类响应会
+        raise ProviderRejected 中断整条链，二三级永远拿不到机会。
+        """
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.host)
+            if request.url.host == "primary.test":
+                return httpx.Response(400, json={"message": "image too small"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        router = ProviderRouter(transport=httpx.MockTransport(handler))
+        result = await router.request(
+            {"messages": []},
+            [
+                ProviderSpec("primary", "https://primary.test", "a", "a", 45),
+                ProviderSpec("secondary", "https://secondary.test", "b", "b", 60),
+            ],
+            110,
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(calls, ["primary.test", "secondary.test"])
+
+    async def test_404_model_not_found_falls_through(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.host)
+            if request.url.host == "primary.test":
+                return httpx.Response(404, json={"message": "model not found"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        router = ProviderRouter(transport=httpx.MockTransport(handler))
+        result = await router.request(
+            {"messages": []},
+            [
+                ProviderSpec("primary", "https://primary.test", "a", "a", 45),
+                ProviderSpec("secondary", "https://secondary.test", "b", "b", 60),
+            ],
+            110,
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(calls, ["primary.test", "secondary.test"])
+
     async def test_three_failures_open_circuit(self):
         now = [100.0]
 

@@ -131,7 +131,9 @@ class ProviderRouter:
                             elapsed=round(self.clock() - started, 3),
                         )
                         return result
-                elif response.status_code not in {429, 500, 502, 503, 504}:
+                elif response.status_code in {401, 403}:
+                    # 鉴权类错误才快速失败：三级 provider 目前共用同一把 SiliconFlow
+                    # key，换一级重试必然同样是 401/403，只会白白耗掉 total_budget。
                     self._emit(
                         event="captcha_provider_attempt",
                         provider=provider.name,
@@ -144,6 +146,10 @@ class ProviderRouter:
                         f"provider_rejected: provider={provider.name} status={response.status_code}"
                     )
                 else:
+                    # 其余状态码一律计入失败并继续尝试下一级 provider。除了 429/5xx，
+                    # 这里还包括 400/404/413/422 这类**模型相关**的拒绝 —— 例如 GLM-4.5V
+                    # 会对尺寸不合规的图返回 400 "height or width must be larger than 28"，
+                    # 而同链路上的 Kimi 模型能正常处理。此前这类响应会直接中断整条降级链。
                     failures.append(f"{provider.name}:http_{response.status_code}")
                     self._emit(
                         event="captcha_provider_attempt",

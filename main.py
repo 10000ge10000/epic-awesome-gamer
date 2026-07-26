@@ -509,12 +509,26 @@ async def admin_metrics(authorization: str | None = Header(default=None)):
         provider_metrics[provider]["circuit_open"] = bool(
             r.exists(f"metrics:provider_circuit:{provider}")
         )
+    # warp:health:* 由 probe_warp_egresses 每轮写入且不设 TTL，任务空窗期也有数据；
+    # metrics:warp:* 只在 worker 跑任务时写、TTL 仅 300 秒，作为补充信息合并进来。
     warp_metrics = {}
-    for index in range(max(1, int(os.getenv("WARP_PROXY_COUNT", "10")))):
-        raw = r.get(f"metrics:warp:{index}")
-        if raw:
+    for index in range(WARP_PROXY_COUNT):
+        entry = {}
+        raw_health = r.get(f"warp:health:{index}")
+        if raw_health:
             with suppress(ValueError, TypeError):
-                warp_metrics[str(index)] = json.loads(raw)
+                entry.update(json.loads(raw_health))
+        raw_task = r.get(f"metrics:warp:{index}")
+        if raw_task:
+            with suppress(ValueError, TypeError):
+                entry["last_task"] = json.loads(raw_task)
+        if entry:
+            warp_metrics[str(index)] = entry
+    warp_summary = {}
+    raw_summary = r.get("warp:health:summary")
+    if raw_summary:
+        with suppress(ValueError, TypeError):
+            warp_summary = json.loads(raw_summary)
 
     heartbeat = r.get("worker:heartbeat")
     try:
@@ -535,6 +549,7 @@ async def admin_metrics(authorization: str | None = Header(default=None)):
         "games": game_results,
         "providers": provider_metrics,
         "warp": warp_metrics,
+        "warp_summary": warp_summary,
         "worker_heartbeat_age_seconds": heartbeat_age,
         "disk_used_percent": disk_percent,
     }
@@ -716,6 +731,157 @@ async def refresh_promotion_cycle() -> None:
         if r.get(lock_key) == lock_value:
             r.delete(lock_key)
 
+# --- WARP 出口健康探测与自愈 ---
+#
+# 背景：2026-07-24 出口 4 的 warp-svc 被 OOM 杀掉后死了 65 小时无人发现。
+# supervisor 的 /health 探测的是外层 wrapper 进程（已 exec 成 gost）而非 warp-svc
+# 本身，poll() 恒为 None，所以 process_running 永远是 true —— compose healthcheck、
+# systemd 看门狗、worker 的 WARP 探测三处都依赖这个接口，于是全部被瞒过。
+# 而账号是按邮箱哈希固定绑定到出口的（worker.py get_warp_index_for_email），
+# 一个出口静默死亡就意味着绑在它上面的账号静默漏领，且不会自动切换。
+#
+# 这里不问 /health，直接走每个代理端口请求 Cloudflare 的 trace 接口，
+# 并断言 warp=on —— 仅仅"能通"是不够的：warp-svc 死后流量有可能直接从容器出去，
+# 那样 IP 会泄漏成宿主 IP，trace 会返回 warp=off，这种情况同样必须判为故障。
+WARP_PROXY_HOST = os.getenv("WARP_PROXY_HOST", "epic-warp")
+WARP_PROXY_START_PORT = int(os.getenv("WARP_PROXY_START_PORT", "19000"))
+WARP_PROXY_COUNT = max(1, int(os.getenv("WARP_PROXY_COUNT", "10")))
+WARP_CONTROL_URL_TEMPLATE = os.getenv(
+    "WARP_CONTROL_URL_TEMPLATE", "http://epic-warp:18080/restart/{idx}"
+)
+WARP_PROBE_INTERVAL_SECONDS = max(60, int(os.getenv("WARP_PROBE_INTERVAL_SECONDS", "600")))
+WARP_PROBE_URL = os.getenv("WARP_PROBE_URL", "https://www.cloudflare.com/cdn-cgi/trace")
+WARP_PROBE_TIMEOUT_SECONDS = float(os.getenv("WARP_PROBE_TIMEOUT_SECONDS", "15"))
+# 连续失败达到该次数才重启，避免单次网络抖动触发重启
+WARP_PROBE_FAILURES_BEFORE_RESTART = max(
+    1, int(os.getenv("WARP_PROBE_FAILURES_BEFORE_RESTART", "2"))
+)
+WARP_PROBE_RESTART_COOLDOWN_SECONDS = max(
+    60, int(os.getenv("WARP_PROBE_RESTART_COOLDOWN_SECONDS", "900"))
+)
+# 单轮最多重启几个出口，防止 WARP 整体故障时把 10 个实例全部反复重启
+WARP_PROBE_MAX_RESTARTS_PER_ROUND = max(
+    1, int(os.getenv("WARP_PROBE_MAX_RESTARTS_PER_ROUND", "2"))
+)
+
+
+async def _probe_warp_egress(index: int) -> dict:
+    """走指定出口请求 trace 接口，确认既连得通、又确实在 WARP 隧道内。"""
+    port = WARP_PROXY_START_PORT + index
+    started = datetime.now().timestamp()
+    record: dict = {"index": index, "port": port, "checked_at": int(started)}
+    try:
+        async with httpx.AsyncClient(
+            proxy=f"http://{WARP_PROXY_HOST}:{port}",
+            timeout=WARP_PROBE_TIMEOUT_SECONDS,
+            trust_env=False,
+        ) as client:
+            response = await client.get(WARP_PROBE_URL)
+        fields = dict(
+            line.split("=", 1)
+            for line in response.text.splitlines()
+            if "=" in line
+        )
+        record["status"] = response.status_code
+        record["warp"] = fields.get("warp", "")
+        record["exit_ip"] = fields.get("ip", "")
+        record["colo"] = fields.get("loc", "")
+        record["ok"] = response.status_code == 200 and fields.get("warp") == "on"
+        if not record["ok"] and response.status_code == 200:
+            # 能出网但没走隧道 —— 出口 IP 已经泄漏成宿主 IP
+            record["error"] = "warp_tunnel_down"
+    except Exception as exc:
+        record["ok"] = False
+        record["error"] = type(exc).__name__
+    record["elapsed"] = round(datetime.now().timestamp() - started, 2)
+    return record
+
+
+async def _restart_warp_egress(index: int) -> bool:
+    url = WARP_CONTROL_URL_TEMPLATE.format(idx=index)
+    try:
+        async with httpx.AsyncClient(timeout=90, trust_env=False) as client:
+            response = await client.post(url)
+        return response.status_code == 200
+    except Exception as exc:
+        print(f"WARP restart failed: index={index} type={type(exc).__name__}")
+        return False
+
+
+async def probe_warp_egresses() -> None:
+    lock_key = "warp_probe_lock"
+    lock_value = f"{SCHEDULER_INSTANCE_ID}:{secrets.token_hex(8)}"
+    if not r.set(lock_key, lock_value, nx=True, ex=max(WARP_PROBE_INTERVAL_SECONDS - 5, 60)):
+        return
+    try:
+        results = await asyncio.gather(
+            *(_probe_warp_egress(i) for i in range(WARP_PROXY_COUNT)),
+            return_exceptions=True,
+        )
+        unhealthy: list[int] = []
+        healthy_count = 0
+        for index, record in enumerate(results):
+            if isinstance(record, BaseException):
+                record = {
+                    "index": index,
+                    "ok": False,
+                    "error": type(record).__name__,
+                    "checked_at": int(datetime.now().timestamp()),
+                }
+            fail_key = f"warp:probe_failures:{index}"
+            if record.get("ok"):
+                healthy_count += 1
+                r.delete(fail_key)
+                record["consecutive_failures"] = 0
+            else:
+                streak = r.incr(fail_key)
+                r.expire(fail_key, 86400)
+                record["consecutive_failures"] = streak
+                if streak >= WARP_PROBE_FAILURES_BEFORE_RESTART:
+                    unhealthy.append(index)
+            # 不设 TTL：任务空窗期也要能看到最后一次探测结果。
+            # （旧的 metrics:warp:* 只在跑任务时写且 TTL 300 秒，所以面板长期是空的。）
+            with suppress(Exception):
+                r.set(f"warp:health:{index}", json.dumps(record, ensure_ascii=True))
+
+        r.set(
+            "warp:health:summary",
+            json.dumps(
+                {
+                    "healthy": healthy_count,
+                    "total": WARP_PROXY_COUNT,
+                    "checked_at": int(datetime.now().timestamp()),
+                },
+                ensure_ascii=True,
+            ),
+        )
+
+        if healthy_count < WARP_PROXY_COUNT:
+            print(
+                f"WARP probe: {healthy_count}/{WARP_PROXY_COUNT} healthy, "
+                f"needs_restart={unhealthy}"
+            )
+
+        restarted = 0
+        for index in unhealthy:
+            if restarted >= WARP_PROBE_MAX_RESTARTS_PER_ROUND:
+                print(f"WARP probe: restart budget exhausted, index={index} deferred")
+                break
+            cooldown_key = f"warp:probe_restart_cooldown:{index}"
+            if not r.set(cooldown_key, "1", nx=True, ex=WARP_PROBE_RESTART_COOLDOWN_SECONDS):
+                continue
+            restarted += 1
+            print(f"WARP probe: restarting index={index}")
+            if await _restart_warp_egress(index):
+                r.delete(f"warp:probe_failures:{index}")
+                print(f"WARP probe: restart accepted index={index}")
+    except Exception as exc:
+        print(f"WARP probe failed: type={type(exc).__name__}")
+    finally:
+        if r.get(lock_key) == lock_value:
+            r.delete(lock_key)
+
+
 scheduler = AsyncIOScheduler()
 scheduler.add_job(
     refresh_promotion_cycle,
@@ -724,6 +890,17 @@ scheduler.add_job(
     next_run_time=datetime.now() + timedelta(seconds=10),
     id="promotion-cycle-refresh",
     replace_existing=True,
+)
+
+scheduler.add_job(
+    probe_warp_egresses,
+    "interval",
+    seconds=WARP_PROBE_INTERVAL_SECONDS,
+    next_run_time=datetime.now() + timedelta(seconds=30),
+    id="warp-egress-probe",
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True,
 )
 
 @app.on_event("startup")
