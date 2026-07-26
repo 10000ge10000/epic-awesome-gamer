@@ -717,6 +717,12 @@ def mark_cycle_complete_if_ready(db_path: str, run_id: str) -> bool:
     return True
 
 
+def redacted_email(email: str) -> str:
+    """把邮箱换成不可逆的占位符，保留行本身用于统计。"""
+    digest = hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
+    return f"deleted-{digest}@removed.invalid"
+
+
 def delete_account_record(db_path: str, email: str) -> str:
     email = normalize_email(email)
     with connect(db_path) as conn:
@@ -724,6 +730,13 @@ def delete_account_record(db_path: str, email: str) -> str:
         if not row:
             raise KeyError("Account does not exist")
         conn.execute("DELETE FROM accounts WHERE email=?", (email,))
+        # logs 与 task_runs 没有指向 accounts 的外键，删号后这两张表里会残留
+        # 已删除用户的明文邮箱（线上实测 24 + 21 行）。这里做匿名化而不是删除：
+        # 既清掉了个人信息，又保留了行本身 —— 累计领取数是首页公开展示的指标，
+        # 直接删行会让它凭空减少。
+        placeholder = redacted_email(email)
+        conn.execute("UPDATE logs SET email=? WHERE email=?", (placeholder, email))
+        conn.execute("UPDATE task_runs SET email=? WHERE email=?", (placeholder, email))
     return row["profile_id"] or ""
 
 

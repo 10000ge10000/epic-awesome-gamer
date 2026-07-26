@@ -310,6 +310,12 @@ deploy_service() {
     chown -R 1002:1002 data
     find data -type d -exec chmod 0700 {} +
     find data -type f -exec chmod 0600 {} +
+    # redis 容器里的 redis-server 以 uid 999 运行，上面的递归 chown 会把
+    # data/redis 一并改成 1002，导致重跑安装脚本直接打掉任务队列的持久化。
+    if [ -d data/redis ]; then
+        chown -R 999:999 data/redis
+        chmod 0700 data/redis
+    fi
 
     # 本地构建并启动（不拉取云端镜像）
     print_info "开始构建镜像（首次约需 5-10 分钟）..."

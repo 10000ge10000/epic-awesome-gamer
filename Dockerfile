@@ -9,6 +9,9 @@ RUN mkdir -p /app/data
 # 意味着 `git pull && docker compose up -d --build` 随时可能构建出一个跑不起来的镜像，
 # 而旧镜像因为共用 epic-kiosk-web:local 这个 tag 已被覆盖，回滚困难。
 # 下面的版本取自 2026-07-27 线上实际运行且验证通过的容器。
+# loguru 是给 app/utils.py 用的 —— app/ 目录由 web 与 worker 共用，
+# 而 utils.py 在模块级 import loguru，web 这边此前没装，导致 main.py
+# 一旦 import app.utils 就会崩。版本与 worker 镜像里的保持一致。
 RUN pip install --no-cache-dir \
     fastapi==0.139.2 \
     uvicorn==0.51.0 \
@@ -19,7 +22,8 @@ RUN pip install --no-cache-dir \
     httpx==0.28.1 \
     cryptography==49.0.0 \
     starlette==1.3.1 \
-    pydantic==2.13.4
+    pydantic==2.13.4 \
+    loguru==0.7.3
 
 RUN groupadd --gid 1002 app && useradd --uid 1002 --gid 1002 --create-home app
 

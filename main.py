@@ -8,6 +8,8 @@ import httpx
 import re
 import secrets
 import ipaddress
+import uuid
+from pathlib import Path
 from contextlib import closing, suppress
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Header, HTTPException
@@ -18,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, field_validator
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.utils import cleanup_debug_artifacts, cleanup_old_logs
 from app.secure_store import (
     CredentialCipher,
     CredentialError,
@@ -925,6 +928,107 @@ async def probe_warp_egresses() -> None:
             r.delete(lock_key)
 
 
+# --- 孤儿浏览器 profile 与调试产物清理 ---
+#
+# verify 任务失败时，secure_store 会删掉 pending_credentials，
+# 而 profile_id 这条唯一线索也随之消失，目录就永远留在 data/user_data 下。
+# 线上实测 28 个孤儿目录、64MB，且每个都含 cookies.sqlite / key4.db（登录态）。
+# 数量精确对应 26 次 failed + 2 次 manual_required。
+#
+# 清理采取两阶段：先移到 data/trash/<日期>/ 保留一段时间再删，
+# 避免把正在跑的任务的 profile 误删掉。
+PROFILE_SWEEP_INTERVAL_SECONDS = max(
+    3600, int(os.getenv("PROFILE_SWEEP_INTERVAL_SECONDS", "86400"))
+)
+PROFILE_TRASH_RETENTION_DAYS = max(1, int(os.getenv("PROFILE_TRASH_RETENTION_DAYS", "7")))
+RUNTIME_DEBUG_RETENTION_DAYS = max(1, int(os.getenv("RUNTIME_DEBUG_RETENTION_DAYS", "7")))
+APP_LOG_RETENTION_DAYS = max(1, int(os.getenv("LOG_RETENTION_DAYS", "30")))
+
+
+def _known_profile_ids() -> set[str]:
+    """当前仍被引用的 profile_id：账号表 + 待确认凭据 + 在途任务。"""
+    known: set[str] = set()
+    with connect(DB_PATH) as conn:
+        for table, column in (
+            ("accounts", "profile_id"),
+            ("pending_credentials", "profile_id"),
+        ):
+            with suppress(sqlite3.Error):
+                for row in conn.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"):
+                    if row[0]:
+                        known.add(str(row[0]))
+    return known
+
+
+def sweep_orphan_profiles() -> None:
+    lock_key = "profile_sweep_lock"
+    lock_value = f"{SCHEDULER_INSTANCE_ID}:{secrets.token_hex(8)}"
+    if not r.set(lock_key, lock_value, nx=True, ex=3600):
+        return
+    try:
+        # 有任务在跑就整轮跳过：此刻正在使用的 profile 不在任何"已知"集合的
+        # 保证之内（run 期间 pending_credentials 可能已被清），宁可下次再扫。
+        if r.llen("task_queue") or r.keys("task_lock:*"):
+            print("Profile sweep skipped: tasks in flight")
+            return
+
+        user_data = Path(USER_DATA_DIR)
+        if not user_data.is_dir():
+            return
+        known = _known_profile_ids()
+        trash_root = Path(DATA_DIR) / "trash"
+        moved = 0
+        for entry in user_data.iterdir():
+            if not entry.is_dir() or entry.is_symlink():
+                continue
+            if entry.name in known:
+                continue
+            try:
+                uuid.UUID(entry.name)
+            except ValueError:
+                # 不是 profile 目录，不碰
+                continue
+            target_dir = trash_root / datetime.now().strftime("%Y%m%d")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            with suppress(OSError):
+                shutil.move(str(entry), str(target_dir / entry.name))
+                moved += 1
+        if moved:
+            print(f"Profile sweep: {moved} orphan profiles moved to trash")
+
+        # 回收超期的 trash
+        cutoff = datetime.now().timestamp() - PROFILE_TRASH_RETENTION_DAYS * 86400
+        purged = 0
+        if trash_root.is_dir():
+            for day_dir in trash_root.iterdir():
+                if day_dir.is_dir() and day_dir.stat().st_mtime < cutoff:
+                    with suppress(OSError):
+                        shutil.rmtree(day_dir)
+                        purged += 1
+        if purged:
+            print(f"Profile sweep: {purged} expired trash buckets removed")
+
+        # 顺带清理调试产物与应用日志（worker 侧只在子进程启动时清一次，
+        # 空窗期没人清；web 这边每天兜一次底）
+        with suppress(Exception):
+            removed = cleanup_debug_artifacts(
+                Path(DATA_DIR) / "runtime", retention_days=RUNTIME_DEBUG_RETENTION_DAYS
+            )
+            if removed:
+                print(f"Profile sweep: {removed} stale debug artifacts removed")
+        with suppress(Exception):
+            removed = cleanup_old_logs(
+                Path(DATA_DIR) / "logs", retention_days=APP_LOG_RETENTION_DAYS
+            )
+            if removed:
+                print(f"Profile sweep: {removed} expired log files removed")
+    except Exception as exc:
+        print(f"Profile sweep failed: type={type(exc).__name__}")
+    finally:
+        if r.get(lock_key) == lock_value:
+            r.delete(lock_key)
+
+
 scheduler = AsyncIOScheduler()
 scheduler.add_job(
     refresh_promotion_cycle,
@@ -941,6 +1045,17 @@ scheduler.add_job(
     seconds=WARP_PROBE_INTERVAL_SECONDS,
     next_run_time=datetime.now() + timedelta(seconds=30),
     id="warp-egress-probe",
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True,
+)
+
+scheduler.add_job(
+    sweep_orphan_profiles,
+    "interval",
+    seconds=PROFILE_SWEEP_INTERVAL_SECONDS,
+    next_run_time=datetime.now() + timedelta(minutes=5),
+    id="orphan-profile-sweep",
     replace_existing=True,
     max_instances=1,
     coalesce=True,

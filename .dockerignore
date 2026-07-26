@@ -63,3 +63,4 @@ tests/
 .coverage
 htmlcov/
 .codex-backups/
+data/trash/

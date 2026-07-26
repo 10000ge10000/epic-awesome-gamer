@@ -61,3 +61,11 @@ build/
 *.whl
 .codex-backups/
 data/redis/
+
+# 运行数据一律不入库。data/trash 是孤儿 profile 的回收站，
+# 里面是含登录态的浏览器 profile；WAL/SHM 是 SQLite 的伴生文件。
+data/trash/
+data/kiosk.db-wal
+data/kiosk.db-shm
+data/*.db-wal
+data/*.db-shm

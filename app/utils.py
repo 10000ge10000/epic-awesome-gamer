@@ -14,6 +14,7 @@
 - 保留 30 天并压缩
 """
 from __future__ import annotations
+from contextlib import suppress
 import os
 import re
 import sys
@@ -22,6 +23,9 @@ from datetime import datetime
 from time import time
 from zoneinfo import ZoneInfo
 from loguru import logger
+
+
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 
 
 def cleanup_debug_artifacts(runtime_dir: Path, retention_days: int = 7) -> int:
@@ -45,6 +49,31 @@ def cleanup_debug_artifacts(runtime_dir: Path, retention_days: int = 7) -> int:
         last_html.unlink()
         removed += 1
     return removed
+
+def cleanup_old_logs(log_dir: Path, retention_days: int = 30) -> int:
+    """删除过期的应用日志。
+
+    loguru 的 retention 在这里指望不上：它靠从文件名模板推导出的 glob 去匹配同族
+    文件，而本项目的日志名是按日期分文件的（runtime-YYYY-MM-DD.log），实测即便
+    把日期换成 {time} 占位符，40 天前的历史文件在 sink 初始化时也不会被清掉。
+    线上实际结果是 data/logs 累积了 201 个文件、75MB、0 个 .gz，
+    自 2026-03-22 起从未清理过。这里按 mtime 做确定性清理。
+    """
+    if not log_dir.is_dir() or log_dir.is_symlink():
+        return 0
+    cutoff = time() - retention_days * 86400
+    removed = 0
+    for path in log_dir.iterdir():
+        if not path.is_file() or path.is_symlink():
+            continue
+        if not (path.name.startswith("runtime-") or path.name.startswith("error-")):
+            continue
+        if path.stat().st_mtime < cutoff:
+            with suppress(OSError):
+                path.unlink()
+                removed += 1
+    return removed
+
 
 def redact_record(record):
     message = str(record["message"])
@@ -160,6 +189,14 @@ def init_log(**sink_channel):
     """
     logger.remove()
 
+    # 启动时先按 mtime 清一次历史日志（loguru 自己的 retention 对本项目
+    # 的按日期分文件命名不生效，见 cleanup_old_logs 的说明）。
+    for _path in sink_channel.values():
+        if _path:
+            with suppress(Exception):
+                cleanup_old_logs(Path(_path).parent, LOG_RETENTION_DAYS)
+            break
+
     # 控制台：使用过滤器，只显示关键日志
     logger.add(
         sink=sys.stdout,
@@ -174,9 +211,11 @@ def init_log(**sink_channel):
         log_dir = error_path.parent
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 使用日期作为文件名后缀
-        date_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-        error_log_file = log_dir / f"error-{date_str}.log"
+        # 日期必须用 loguru 的 {time} 占位符，不能在应用层写死。
+        # 此前是初始化时算好 date_str 拼进文件名，loguru 只认得当天那一族文件，
+        # 于是 retention="30 days" 和 compression="gz" 对历史文件完全不生效 ——
+        # 实测 data/logs 下 201 个文件、75MB、0 个 .gz，自 2026-03-22 起从未清理。
+        error_log_file = log_dir / "error-{time:YYYY-MM-DD}.log"
 
         logger.add(
             sink=str(error_log_file),
@@ -195,9 +234,11 @@ def init_log(**sink_channel):
         log_dir = runtime_path.parent
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 使用日期作为文件名后缀
-        date_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-        runtime_log_file = log_dir / f"runtime-{date_str}.log"
+        # 日期必须用 loguru 的 {time} 占位符，不能在应用层写死。
+        # 此前是初始化时算好 date_str 拼进文件名，loguru 只认得当天那一族文件，
+        # 于是 retention="30 days" 和 compression="gz" 对历史文件完全不生效 ——
+        # 实测 data/logs 下 201 个文件、75MB、0 个 .gz，自 2026-03-22 起从未清理。
+        runtime_log_file = log_dir / "runtime-{time:YYYY-MM-DD}.log"
 
         logger.add(
             sink=str(runtime_log_file),
