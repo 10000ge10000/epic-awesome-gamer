@@ -42,7 +42,12 @@ DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "kiosk.db"))
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "900"))
 TASK_SOFT_TIMEOUT_SECONDS = int(os.getenv("TASK_SOFT_TIMEOUT_SECONDS", "480"))
-TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "86400"))
+# 锁的存活时间只需覆盖「一次任务执行 + 最长一次延迟重试等待」，
+# 而不是一整天。线上实测最长单次任务 2790 秒、绝大多数在 116 秒左右，
+# 最长的延迟重试是 captcha 的 7200 秒。取 9000 秒留有余量。
+# 此前的 86400 会把任何一次锁泄漏都放大成整整一天的账号不可用，
+# 而系统里并没有任何解锁入口。
+TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "9000"))
 TASK_MIN_GAME_BUDGET_SECONDS = int(os.getenv("TASK_MIN_GAME_BUDGET_SECONDS", "180"))
 
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
@@ -195,10 +200,52 @@ def log_worker_boot_info() -> None:
     log_worker_runtime_health("startup")
 
 
+# 主循环存活标记。心跳线程只是"转发"这个值，绝不自己凭空刷新 ——
+# 此前心跳是独立 daemon 线程无条件每 30 秒写一次，与主循环零耦合：
+# 主循环卡死时心跳照常刷新，Docker healthcheck 一直绿灯，队列却再也不消费。
+_MAIN_LOOP_TICK = time.monotonic()
+_CURRENT_TASK_STARTED_AT: float | None = None
+# 主循环空转一圈最多 10 秒（blpop timeout），给足余量
+MAIN_LOOP_STALL_SECONDS = int(os.getenv("MAIN_LOOP_STALL_SECONDS", "120"))
+# 单个任务的硬上限之上再留 10 分钟；超过即认为 run_task 自身卡死
+TASK_STALL_SECONDS = int(os.getenv("TASK_STALL_SECONDS", str(TASK_TIMEOUT_SECONDS + 600)))
+
+
+def _mark_main_loop_alive(task_started_at: float | None = ...) -> None:
+    global _MAIN_LOOP_TICK, _CURRENT_TASK_STARTED_AT
+    _MAIN_LOOP_TICK = time.monotonic()
+    if task_started_at is not ...:
+        _CURRENT_TASK_STARTED_AT = task_started_at
+
+
+def _main_loop_stall_seconds() -> float:
+    """返回主循环卡住的秒数；0 表示健康。"""
+    now = time.monotonic()
+    started = _CURRENT_TASK_STARTED_AT
+    if started is not None:
+        overrun = now - started - TASK_STALL_SECONDS
+        return overrun if overrun > 0 else 0.0
+    overrun = now - _MAIN_LOOP_TICK - MAIN_LOOP_STALL_SECONDS
+    return overrun if overrun > 0 else 0.0
+
+
 def worker_heartbeat_loop() -> None:
+    warned = False
     while True:
-        with suppress(Exception):
-            r.set("worker:heartbeat", str(time.time()), ex=90)
+        stalled = _main_loop_stall_seconds()
+        if stalled > 0:
+            # 不再刷新心跳，让它按 90 秒 TTL 自然过期，healthcheck 随之转红。
+            # 与其谎报健康，不如让故障可见。
+            if not warned:
+                print(
+                    f"Worker main loop appears stalled for {int(stalled)}s beyond budget; "
+                    f"heartbeat withheld so healthcheck can turn red"
+                )
+                warned = True
+        else:
+            warned = False
+            with suppress(Exception):
+                r.set("worker:heartbeat", str(time.time()), ex=90)
         time.sleep(30)
 
 
@@ -873,6 +920,7 @@ LOG_TRANSLATIONS = {
     "is read-only": "（只读错误，已忽略）",
     "invalid_account_credentials": "账号或密码错误",
     "errors.com.epicgames.account.invalid_account_credentials": "账号或密码错误",
+    "two_factor_authentication.required": "该账号需要两步验证",
     "errorCode": "错误码",
     "errorMessage": "错误信息",
 }
@@ -949,6 +997,14 @@ ERROR_TYPE_MESSAGES = {
     "driver_crash": {
         "status": "⚠️ 浏览器驱动断连",
         "hint": "系统会稍后自动重试；若频繁出现，请联系管理员查看 Worker 日志",
+        "nuke": False,
+    },
+    # 账号开启了两步验证
+    "two_factor_required": {
+        "status": "❌ 该账号开启了两步验证",
+        "hint": "自动化无法完成邮箱验证码环节。请在 Epic 账户设置 → 密码与安全中关闭两步验证后重新托管",
+        # 不设 nuke：两步验证是用户可以自行关闭的，不该因此删掉账号。
+        # 该类型也不在任何重试策略集合里，所以会直接终止，不会每个周期都撞一次。
         "nuke": False,
     },
     # Cookie 无效（下次执行时会自动重新登录，无需删除）
@@ -1047,8 +1103,19 @@ def iter_process_output(process: subprocess.Popen, timeout_seconds: int):
                     continue
 
             if process.poll() is not None:
-                for line in process.stdout:
+                # 子进程已退出，但管道里可能还有缓冲数据。这里必须受 deadline 约束：
+                # 若 camoufox/xvfb 留下了仍持有管道写端的孙进程，
+                # 无界的 `for line in process.stdout` 会永远阻塞，
+                # 而外层的 deadline 检查在 while 循环里，根本轮不到执行。
+                while time.monotonic() < deadline:
+                    if not selector.select(timeout=1):
+                        break
+                    line = process.stdout.readline()
+                    if not line:
+                        break
                     yield line
+                else:
+                    print("Worker drain timed out; residual pipe holder suspected")
                 break
     finally:
         selector.close()
@@ -1475,6 +1542,18 @@ def run_task(task_data):
         # 正常结束，执行常规瘦身
         clean_user_profile(profile_id)
 
+        # 先把本轮已经领到的游戏入库，再判断是否要早退重试。
+        # 此前下面三个早退分支都排在 report_success 之前就 return，于是走重试路径时
+        # 本轮明明已经领到手的游戏不会写进 logs 表 —— docker-compose.yml 里那个
+        # CLAIM_HISTORY_OFFSET（注释写着"用于补偿因入库 API 失效丢失的历史记录"）
+        # 就是在给这个缺口打补丁。入库本身是幂等的（/api/report_game 先查后插、
+        # record_game_result 用 ON CONFLICT），提前执行不会产生重复记录。
+        successful_games, claimed_games, failed_games = summarize_game_results(game_results)
+        report_failures = []
+        for game_title in successful_games:
+            if not report_success(email, game_title, run_id):
+                report_failures.append(game_title)
+
         if final_error_type == "cookie_invalid" and not is_fatal_failure:
             schedule_cookie_invalid_retry(task_data)
             return
@@ -1490,13 +1569,7 @@ def run_task(task_data):
         if return_code != 0 and not final_error_type:
             final_error_type = "unknown"
 
-        successful_games, claimed_games, failed_games = summarize_game_results(game_results)
-
         if successful_games:
-            report_failures = []
-            for game_title in successful_games:
-                if not report_success(email, game_title, run_id):
-                    report_failures.append(game_title)
             if failed_games or report_failures or (
                 final_error_type and final_error_type not in {"success", "all_owned"}
             ):
@@ -1665,6 +1738,7 @@ def main_loop():
     cipher = CredentialCipher.from_environment()
     threading.Thread(target=worker_heartbeat_loop, name="worker-heartbeat", daemon=True).start()
     while True:
+        _mark_main_loop_alive()
         if _sigchld_seen:
             reap_child_processes()
         move_due_scheduled_tasks()
@@ -1698,8 +1772,17 @@ def main_loop():
                     r.delete(f"task_lock:{context.account_ref}")
                     task_data = None
                     continue
+                # retry_pending 的语义统一为「重试已排期但尚未开始执行」。
+                # 此前只有 move_due_retry_tasks 会删它，而 schedule_cookie_invalid_retry
+                # 是直接 rpush 到 task_queue、不经过延迟队列的，于是该键永远留着，
+                # 下面 finally 里的判定就永远不删 task_lock —— 账号被锁死 TASK_LOCK_SECONDS。
+                r.delete(f"retry_pending:{run_id}")
                 r.setex(f"task_lock:{context.account_ref}", TASK_LOCK_SECONDS, "running")
-                run_task(task_data)
+                _mark_main_loop_alive(time.monotonic())
+                try:
+                    run_task(task_data)
+                finally:
+                    _mark_main_loop_alive(None)
             except Exception as exc:
                 print(f"Task context load failed: type={type(exc).__name__}")
                 if run_id:

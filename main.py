@@ -63,7 +63,7 @@ app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 DB_PATH = os.path.join(DATA_DIR, "kiosk.db")
 INTERNAL_API_TOKEN = read_secret("INTERNAL_API_TOKEN", "INTERNAL_API_TOKEN_FILE")
-TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "86400"))
+TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "9000"))
 CONFIRM_TOKEN_SECONDS = int(os.getenv("CONFIRM_TOKEN_SECONDS", "86400"))
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "https://epic.910501.xyz").rstrip("/")
 MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "false").lower() in {"1", "true", "yes", "on"}

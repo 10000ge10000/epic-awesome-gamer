@@ -68,6 +68,9 @@ class ErrorType(Enum):
     # Cookie 无效 - 需要重新登录
     COOKIE_INVALID = "cookie_invalid"
 
+    # 账号开启了两步验证 - 自动化无法完成邮箱验证码环节，需用户自行关闭
+    TWO_FACTOR_REQUIRED = "two_factor_required"
+
     # 未知错误 - 需要用户查看日志
     UNKNOWN = "unknown"
 
@@ -321,6 +324,12 @@ class EpicAuthorization:
             return ErrorType.ACCOUNT_LOCKED
         if "csrf_token_invalid" in error_code:
             return ErrorType.COOKIE_INVALID
+        if "two_factor_authentication.required" in error_code or "two_factor" in error_code:
+            return ErrorType.TWO_FACTOR_REQUIRED
+        # 兜底之前把原始 errorCode 打出来。此前所有未覆盖的 Epic 错误码都被
+        # 静默归为 unknown，线上 unknown 曾是真实失败中占比最大的一类，
+        # 但日志里看不出它们究竟是什么 —— 记下来才能持续补全上面的分支。
+        logger.warning(f"Unmapped Epic login errorCode: {error_code}")
         return ErrorType.UNKNOWN
 
     async def _handle_right_account_validation(self):
