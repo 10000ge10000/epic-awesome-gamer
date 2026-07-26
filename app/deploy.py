@@ -82,6 +82,26 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
 
     try:
         # Configure browser with anti-detection features
+        # geoip=True 让 camoufox 按出口 IP 对齐时区、语言与经纬度。
+        # 走代理却不开它时 camoufox 自己就会在日志里警告：
+        #   "When using a proxy, it is heavily recommended that you pass geoip=True"
+        # 指纹与出口 IP 不匹配会推高验证码难度。
+        #
+        # 默认关闭，需要时用 EPIC_ENABLE_GEOIP=1 打开：改的是浏览器指纹，
+        # 而账号用的是带既有登录态的持久化 profile —— 对一个已在稳定运行的
+        # 部署来说，这属于要挑时机、且要能立刻回退的改动（改环境变量重启即可，
+        # 不需要重建 2.84GB 的镜像）。建议在一轮周免跑完、确认基线之后再打开，
+        # 并优先观察此前反复卡验证码的账号。
+        enable_geoip = os.getenv("EPIC_ENABLE_GEOIP", "0") == "1"
+        if enable_geoip:
+            logger.info("Camoufox geoip enabled: fingerprint will follow the proxy exit IP")
+            with suppress(Exception):
+                from camoufox.locale import MMDB_FILE
+                if not MMDB_FILE.exists():
+                    logger.warning(
+                        "GeoLite2 database missing; camoufox will download it at runtime "
+                        "(约 60MB，走 WARP 代理，可能拖慢本次任务)"
+                    )
         async with AsyncCamoufox(
             persistent_context=True,
             user_data_dir=settings.user_data_dir,
@@ -89,6 +109,7 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
             humanize=0.2,
             headless=headless,
             proxy=proxy_config,
+            geoip=enable_geoip,
         ) as browser:
             # Initialize or reuse existing browser page
             page = browser.pages[0] if browser.pages else await browser.new_page()

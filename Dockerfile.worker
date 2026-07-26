@@ -233,6 +233,14 @@ USER app
 RUN python3 -c "from camoufox.sync_api import Camoufox; Camoufox(headless=True).__enter__().__exit__(None, None, None)"
 USER root
 
+# 预置 GeoLite2 数据库。camoufox 只在首次用到 geoip=True 时才去下载它（约 60MB），
+# 留到运行期就等于在每个领取任务的关键路径上插进一次外网下载，而 worker 出网还要
+# 经 WARP 代理，多一个失败点。必须以 root 执行：MMDB_FILE 指向 root 拥有的
+# site-packages 目录，之后再放开读权限给运行用户 1002。
+# 做成尽力而为：上游在 GitHub，构建时临时不可达不该让整个镜像构建失败；
+# 真缺了的话 deploy.py 在启用 geoip 时会打警告。
+RUN python3 -c "from camoufox.locale import download_mmdb; download_mmdb()"       && chmod 0644 /usr/local/lib/python3.12/site-packages/camoufox/GeoLite2-City.mmdb       && echo "GeoLite2 mmdb prefetched"     || echo "WARNING: GeoLite2 mmdb prefetch failed; geoip=True will download at runtime"
+
 # hcaptcha-challenger 0.19.0 writes logs beside its installed package at import
 # time. Redirect that hard-coded path to the persistent data volume so the
 # non-root worker can initialize the library without making site-packages writable.

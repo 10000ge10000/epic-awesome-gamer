@@ -205,6 +205,10 @@ services:
       - WARP_CONTROL_RESTART_BACKOFF_SECONDS=${WARP_CONTROL_RESTART_BACKOFF_SECONDS:-5}
       - WARP_CONTAINER_FALLBACK_RESTARTS=0
       - TASK_SPACING_SECONDS=5
+      # 让浏览器指纹按 WARP 出口 IP 对齐时区/语言/经纬度。改的是指纹，
+      # 而账号用的是带既有登录态的持久化 profile，建议在一轮周免跑完
+      # 确认基线之后再置为 1；出问题改回 0 重启即可，无需重建镜像。
+      - EPIC_ENABLE_GEOIP=${EPIC_ENABLE_GEOIP:-0}
     depends_on:
       redis:
         condition: service_healthy

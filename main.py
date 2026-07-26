@@ -1026,6 +1026,62 @@ def sweep_orphan_profiles() -> None:
             r.delete(lock_key)
 
 
+# --- WARP 实例定期轮转回收 ---
+#
+# warp-svc 存在稳定的内存泄漏：2026-07-27 重建前实测 10 个实例共 4.79 GB
+# （平均 545 MB/个，而全新启动约 30-50 MB），容器 cgroup 触顶 19144 次、
+# OOM 7 次杀掉 3 个进程。调大 mem_limit 只是把 OOM 推迟几天 —— 主机 23 GiB
+# 里已用掉 12 GiB 且 swap 吃了 2.5/4 GiB，没有调大的余量。
+#
+# 这里按固定节奏轮流重启实例，把内存曲线压平：每次只动一个，
+# 10 个实例即每个约 WARP_RECYCLE_INTERVAL × 10 被回收一次。
+WARP_RECYCLE_INTERVAL_SECONDS = max(
+    600, int(os.getenv("WARP_RECYCLE_INTERVAL_SECONDS", "21600"))
+)
+WARP_RECYCLE_ENABLED = os.getenv("WARP_RECYCLE_ENABLED", "1") == "1"
+
+
+async def recycle_warp_egress() -> None:
+    if not WARP_RECYCLE_ENABLED:
+        return
+    lock_key = "warp_recycle_lock"
+    lock_value = f"{SCHEDULER_INSTANCE_ID}:{secrets.token_hex(8)}"
+    if not r.set(lock_key, lock_value, nx=True, ex=max(WARP_RECYCLE_INTERVAL_SECONDS - 60, 300)):
+        return
+    try:
+        # 有任务在跑就跳过这一轮。回收是预防性的，没必要跟正在领取的任务抢出口；
+        # 下一轮（默认 6 小时后）再做。
+        if r.llen("task_queue") or r.keys("task_lock:*"):
+            print("WARP recycle skipped: tasks in flight")
+            return
+
+        # 轮转指针存在 Redis 里，web 重启也不会从头再来
+        index = int(r.incr("warp:recycle_cursor")) % WARP_PROXY_COUNT
+
+        # 刚被探测重启过的实例跳过，避免短时间内连续重启同一个
+        if r.exists(f"warp:probe_restart_cooldown:{index}"):
+            print(f"WARP recycle skipped index={index}: restarted recently")
+            return
+
+        print(f"WARP recycle: restarting index={index}")
+        if await _restart_warp_egress(index):
+            # 打上与探测共用的冷却标记，两条路径互不打架
+            r.set(
+                f"warp:probe_restart_cooldown:{index}",
+                "1",
+                ex=WARP_PROBE_RESTART_COOLDOWN_SECONDS,
+            )
+            r.delete(f"warp:probe_failures:{index}")
+            print(f"WARP recycle: index={index} restarted")
+        else:
+            print(f"WARP recycle: index={index} restart failed")
+    except Exception as exc:
+        print(f"WARP recycle failed: type={type(exc).__name__}")
+    finally:
+        if r.get(lock_key) == lock_value:
+            r.delete(lock_key)
+
+
 scheduler = AsyncIOScheduler()
 scheduler.add_job(
     refresh_promotion_cycle,
@@ -1053,6 +1109,17 @@ scheduler.add_job(
     seconds=PROFILE_SWEEP_INTERVAL_SECONDS,
     next_run_time=datetime.now() + timedelta(minutes=5),
     id="orphan-profile-sweep",
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True,
+)
+
+scheduler.add_job(
+    recycle_warp_egress,
+    "interval",
+    seconds=WARP_RECYCLE_INTERVAL_SECONDS,
+    next_run_time=datetime.now() + timedelta(minutes=30),
+    id="warp-egress-recycle",
     replace_existing=True,
     max_instances=1,
     coalesce=True,
