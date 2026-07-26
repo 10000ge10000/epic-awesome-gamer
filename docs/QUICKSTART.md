@@ -1,5 +1,11 @@
 # 快速开始
 
+> **注意（2026-07 更新）**：本文中直接在 `.env` 里写 `API_KEY=` / `INTERNAL_API_TOKEN=`
+> 的做法**已经失效**。compose 只读 `*_FILE` 与 `*_PATH` 变量，密钥必须落成文件再挂载
+> 为 docker secret，参见 README 的部署章节。另外 `CAPTCHA_API_TIMEOUT` 在代码中不存在。
+
+
+
 本文面向首次部署用户。Epic Kiosk 通过 Docker Compose 运行 `web`、`worker`、`redis` 和 `warp` 服务。
 
 ## 前置条件

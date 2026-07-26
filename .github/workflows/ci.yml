@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        # 只装跑测试真正需要的部分。完整的 worker 依赖（camoufox / playwright /
+        # hcaptcha-challenger）体积上 GB 且需要下载浏览器，不适合放进 CI；
+        # 依赖它们的测试会在下一步被跳过并明确列出。
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest fakeredis httpx pydantic pydantic-settings \
+                      cryptography redis loguru pytz tenacity ruff black
+
+      - name: 静态检查
+        run: |
+          ruff check . || true          # 首次接入先不拦，只暴露问题
+          black --check . || true
+
+      - name: 单元测试
+        # 逐个模块跑，未满足依赖的模块只跳过而不让整体失败 ——
+        # 这样至少能守住不依赖浏览器栈的那部分（provider_router、secure_store、
+        # claim_cycles、migration 等），后续再逐步收紧。
+        run: |
+          set +e
+          failed=0
+          for f in tests/test_*.py; do
+            echo "::group::$f"
+            python -m pytest "$f" -q
+            code=$?
+            if [ $code -eq 0 ]; then echo "PASS $f"
+            elif python -c "import sys; sys.exit(0)" && python -m pytest "$f" -q 2>&1 | grep -q "ModuleNotFoundError"; then
+              echo "SKIP $f (缺少浏览器栈依赖)"
+            else
+              echo "FAIL $f"; failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+        env:
+          DATA_DIR: /tmp/epic-kiosk-ci
+          INTERNAL_API_TOKEN: ci-test-token
+          EPIC_CREDENTIAL_KEYS: 9QKUvZF-uPSzD4suKpprhwUTUyoj5nrR9BgeJeAs5mM=
+          GEMINI_API_KEY: not_used
+          ENABLE_APSCHEDULER: "false"

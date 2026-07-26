@@ -360,10 +360,6 @@ class EpicSettings(AgentConfig):
 
     ENABLE_APSCHEDULER: bool = Field(default=True)
     TASK_TIMEOUT_SECONDS: int = Field(default=900)
-    REDIS_URL: str = Field(default="redis://redis:6379/0")
-    CELERY_WORKER_CONCURRENCY: int = Field(default=1)
-    CELERY_TASK_TIME_LIMIT: int = Field(default=1200)
-    CELERY_TASK_SOFT_TIME_LIMIT: int = Field(default=900)
 
     @property
     def user_data_dir(self) -> Path:
@@ -752,8 +748,12 @@ JSON Schema:
             从响应中提取 JSON 代码块
             支持模型自动切换（验证码任务 vs 普通任务）
             """
-            # 用于跟踪是否需要使用备用模型
-            use_fallback = False
+            # is_captcha_task 必须在 try 之前绑定：下面的 except 块会读它，
+            # 而它的赋值点在 try 里且位于若干可能抛异常的语句之后
+            # （例如 contents 为空时会先 raise ValueError）。
+            # 一旦从那些语句抛出，except 里访问它就是 UnboundLocalError，
+            # 真实异常被一个与验证码毫无关系的错误掩盖，排障会被引向错误方向。
+            is_captcha_task = False
 
             try:
                 # 标准化 contents

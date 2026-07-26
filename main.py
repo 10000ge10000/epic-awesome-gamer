@@ -84,7 +84,6 @@ app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 DB_PATH = os.path.join(DATA_DIR, "kiosk.db")
 INTERNAL_API_TOKEN = read_secret("INTERNAL_API_TOKEN", "INTERNAL_API_TOKEN_FILE")
 TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "9000"))
-CONFIRM_TOKEN_SECONDS = int(os.getenv("CONFIRM_TOKEN_SECONDS", "86400"))
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "https://epic.910501.xyz").rstrip("/")
 MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "false").lower() in {"1", "true", "yes", "on"}
 
@@ -103,8 +102,6 @@ ENABLE_APSCHEDULER = os.getenv("ENABLE_APSCHEDULER", "false").lower() in {
     "yes",
     "on",
 }
-# 保留旧环境变量兼容性；当前调度频率由 PROMOTION_REFRESH_INTERVAL_SECONDS 控制。
-DAILY_SCHEDULE_LOCK_SECONDS = int(os.getenv("DAILY_SCHEDULE_LOCK_SECONDS", "86400"))
 SCHEDULER_INSTANCE_ID = os.getenv("HOSTNAME", "web")
 CLAIM_BATCH_SIZE = max(1, int(os.getenv("CLAIM_BATCH_SIZE", "5")))
 CLAIM_BATCH_INTERVAL_SECONDS = max(

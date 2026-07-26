@@ -1,3 +1,4 @@
+import inspect
 import os
 import json
 import sqlite3
@@ -5,6 +6,19 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+
+async def _call_route(func, *args, **kwargs):
+    """调用路由处理函数，同时兼容 async def 与普通 def。
+
+    main.py 里做同步 IO（sqlite / 同步 redis）的路由已经从 async def 改成 def，
+    交给 FastAPI 的线程池执行，以免阻塞单一事件循环。测试是直接调用处理函数
+    而不是走 ASGI 栈的，所以这里要自己判断返回值是不是可等待对象。
+    """
+    result = func(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class FakeRedis:
@@ -152,7 +166,7 @@ class SecurityQueueTests(unittest.IsolatedAsyncioTestCase):
         self.main.update_task(self.main.DB_PATH, run_id, state="succeeded")
         request = self.main.TaskRequest(task_id=run_id)
 
-        result = await self.main.save_account(request, f"Bearer {token}")
+        result = await _call_route(self.main.save_account, request, f"Bearer {token}")
         self.assertEqual(result["status"], "saved")
         self.assertNotEqual(result["access_token"], token)
         self.assertIsNone(self.main.account_for_token(self.main.DB_PATH, token))
@@ -170,7 +184,7 @@ class SecurityQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", stored[1])
 
         with self.assertRaises(self.main.HTTPException) as reused:
-            await self.main.save_account(request, f"Bearer {token}")
+            await _call_route(self.main.save_account, request, f"Bearer {token}")
         self.assertEqual(reused.exception.status_code, 401)
 
     async def test_game_reporting_is_idempotent(self):
@@ -180,8 +194,8 @@ class SecurityQueueTests(unittest.IsolatedAsyncioTestCase):
             image_filename="game-a.jpg",
         )
         authorization = "Bearer test-internal-token"
-        first = await self.main.report_game(log, authorization)
-        second = await self.main.report_game(log, authorization)
+        first = await _call_route(self.main.report_game, log, authorization)
+        second = await _call_route(self.main.report_game, log, authorization)
 
         self.assertEqual(first["status"], "recorded")
         self.assertEqual(second["status"], "skipped")
@@ -270,7 +284,7 @@ class SecurityQueueTests(unittest.IsolatedAsyncioTestCase):
         )
         self.main.record_game_result(self.main.DB_PATH, run_id, "Game A", "owned")
 
-        result = await self.main.report_game(
+        result = await _call_route(self.main.report_game, 
             self.main.GameLog(
                 email=email,
                 game_title="Game A",

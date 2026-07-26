@@ -15,7 +15,6 @@ import queue
 import threading
 import hashlib
 from contextlib import suppress
-from bs4 import BeautifulSoup
 
 from app.secure_store import (
     CredentialCipher,
@@ -78,10 +77,6 @@ EPIC_TEST_TIMEOUT = 10  # 秒
 # ============================================================
 RETRY_QUEUE = "task_retry_queue"
 SCHEDULED_TASK_QUEUE = "task_scheduled_queue"
-CAPTCHA_FAILURE_MAX_RETRIES = int(os.getenv("CAPTCHA_FAILURE_MAX_RETRIES", "2"))
-CAPTCHA_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("CAPTCHA_FAILURE_RETRY_DELAY_SECONDS", "900"))
-NETWORK_FAILURE_MAX_RETRIES = int(os.getenv("NETWORK_FAILURE_MAX_RETRIES", "2"))
-NETWORK_FAILURE_RETRY_DELAY_SECONDS = int(os.getenv("NETWORK_FAILURE_RETRY_DELAY_SECONDS", "600"))
 COOKIE_INVALID_MAX_RETRIES = int(os.getenv("COOKIE_INVALID_MAX_RETRIES", "1"))
 WARP_RESTART_COOLDOWN_SECONDS = int(os.getenv("WARP_RESTART_COOLDOWN_SECONDS", "300"))
 TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "5"))
@@ -594,6 +589,13 @@ def schedule_cookie_invalid_retry(task_data: dict) -> bool:
 def schedule_failure_retry(task_data: dict, error_type: str, warp_index: int | None = None) -> bool:
     """把可恢复失败放入 Redis 延迟队列，并限制重试次数和节奏。"""
     email = task_data.get("email", "")
+    # 注意：这张表是硬编码的，不读环境变量。
+    # 此前 compose、.env.example 和 README 都在维护
+    # CAPTCHA_FAILURE_MAX_RETRIES / *_RETRY_DELAY_SECONDS /
+    # NETWORK_FAILURE_MAX_RETRIES / *_RETRY_DELAY_SECONDS 这四个变量，
+    # 但 worker.py 把它们读进常量后从不使用 —— 运维照着文档改配置、
+    # 重建 2.84GB 的镜像，行为却纹丝不动。这四个变量已一并删除。
+    # 如需调整重试策略，直接改这里的元组：(最大重试次数, 延迟秒数, 中文标签)。
     policies = {
         "captcha_failed": (1, 7200, "验证码失败"),
         "captcha_unsolved": (1, 7200, "验证码未能识别"),
@@ -722,7 +724,7 @@ def fetch_steam_cover(game_title):
         if data.get('total') > 0 and data.get('items'):
             app_id = data['items'][0]['id']
             return f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg"
-    except: pass
+    except Exception as exc: print(f"Steam cover lookup failed: {type(exc).__name__}")
     return None
 
 def scrape_and_download_image(game_title):
@@ -741,7 +743,7 @@ def scrape_and_download_image(game_title):
             with open(save_path, 'wb') as f:
                 f.write(img_data)
             return filename
-    except: pass
+    except Exception as exc: print(f"Cover download failed: {type(exc).__name__}")
     return None
 
 def report_success(email, game_title, run_id=None):
@@ -803,11 +805,11 @@ def clean_user_profile(profile_id):
         
         for folder in folders_to_nuke:
             try: shutil.rmtree(os.path.join(profile_path, folder))
-            except: pass
+            except Exception: pass  # 单个目录删不掉不影响整体瘦身
         for pattern in files_to_nuke:
             for f in glob.glob(os.path.join(profile_path, pattern)):
                 try: os.remove(f)
-                except: pass
+                except Exception: pass  # 单个文件删不掉不影响整体瘦身
 
 def nuke_account_immediately(email: str, profile_id: str) -> None:
     """

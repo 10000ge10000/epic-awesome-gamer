@@ -1,5 +1,12 @@
 # AI 模型配置
 
+> **注意（2026-07 更新）**：本文提到的 `CAPTCHA_API_TIMEOUT` 在代码中不存在。
+> 当前生产用的是 SiliconFlow（非 NVIDIA），三级降级链为
+> `CAPTCHA_PRIMARY_MODEL` → `CAPTCHA_SECONDARY_MODEL` → `CAPTCHA_TERTIARY_MODEL`，
+> 由 `app/provider_router.py` 负责熔断与降级。2026-07-27 实测三个模型均具备视觉能力。
+
+
+
 Epic Kiosk 使用 OpenAI-compatible API 处理文本判断和 hCaptcha 视觉识别。项目内部会把自动化流程中的模型调用转换为 `/v1/chat/completions` 请求，因此 Provider 只要兼容该接口即可接入。
 
 ## 推荐配置

@@ -2,11 +2,8 @@
 name = "epic-kiosk"
 version = "0.4.1"
 dependencies = [
-    "aiofiles>=24.1.0",
     "apscheduler>=3.11.0",
-    "beautifulsoup4>=4.12.0",
     "browserforge>=1.2.0",
-    "celery[redis]>=5.4.0",
     "camoufox[geoip]==0.4.11",
     "cryptography>=45.0.0",
     "fastapi>=0.115.0",
@@ -14,8 +11,6 @@ dependencies = [
     "httpx>=0.28.0",
     "jinja2>=3.1.0",
     "loguru>=0.7.0",
-    "lxml>=5.0.0",
-    "openai", # OpenAI 兼容模型接口（当前默认使用 SiliconFlow）
     "playwright==1.56.0",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.8.1",
@@ -26,7 +21,8 @@ dependencies = [
     "tenacity>=8.5.0",
     "uvicorn>=0.30.0",
 ]
-requires-python = ">=3.12,<=3.13"
+# <=3.13 会把 3.13.1 这类补丁版本排除在外，正确写法是 <3.14
+requires-python = ">=3.12,<3.14"
 authors = [
     { name = "一万", email = "10000ge10000@gmail.com" }
 ]
@@ -62,12 +58,25 @@ target-version = ["py310", "py311", "py312", "py313"]
 skip-string-normalization = true
 
 [tool.pytest.ini_options]
-pythonpath = ["app"]
+# 必须带上仓库根：测试里同时用了 `import worker` / `import main` /
+# `from scripts.migrate_secure_storage import ...`（需要 <rootdir>）和
+# `from app.secure_store import ...`（也需要 <rootdir>），
+# 只加 <rootdir>/app 的话在仓库根直接跑 pytest 会 ModuleNotFoundError。
+pythonpath = [".", "app"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E501 交给 black 管；E722 专门用来抓裸 except:
+select = ["E", "F", "W", "B", "UP"]
+ignore = ["E501"]
 
 [dependency-groups]
 dev = [
     "black>=25.1.0",
-    "celery-types>=0.23.0",
     "pytest>=8.3.5",
     "fakeredis>=2.30.0",
     "ruff>=0.12.3",

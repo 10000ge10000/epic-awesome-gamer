@@ -291,7 +291,14 @@ class WorkerResultTests(unittest.TestCase):
             os.kill(pid, 0)
         except ProcessLookupError:
             return False
-        return True
+        # 僵尸不算存活。进程被杀掉后如果父进程已经先退出，它会被重新父化给
+        # PID 1；而在测试容器里 PID 1 就是跑 unittest 的这个进程本身，不会去
+        # 回收它，于是它以 Z 状态留着 —— 而 os.kill(pid, 0) 对僵尸并不报错。
+        # 此前这里把僵尸判成"仍然存活"，导致
+        # test_terminate_process_group_kills_child_process 恒失败，
+        # 而 terminate_process_group 本身是正确的（生产环境有
+        # reap_child_processes 和容器的 init:true 负责回收）。
+        return WorkerResultTests._process_stat(pid) != "Z"
 
     @staticmethod
     def _process_stat(pid):
