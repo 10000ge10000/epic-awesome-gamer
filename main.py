@@ -8,9 +8,10 @@ import httpx
 import re
 import secrets
 import ipaddress
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -53,6 +54,22 @@ app = FastAPI(
     redoc_url="/redoc" if _EXPOSE_DOCS else None,
     openapi_url="/openapi.json" if _EXPOSE_DOCS else None,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """剥掉校验错误里的 input 字段。
+
+    Pydantic v2 + FastAPI 默认会把用户提交的原值原样放进 422 响应体。
+    Account.password 有 len>512 的校验，一旦触发，用户的明文密码就会随响应
+    回到 nginx access log、Cloudflare 日志和浏览器 devtools 里。
+    这里只保留定位问题所需的 loc/msg/type。
+    """
+    safe = [
+        {k: v for k, v in error.items() if k in {"loc", "msg", "type"}}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": safe})
 templates = Jinja2Templates(directory="templates")
 
 # 1. 挂载与路径
@@ -94,6 +111,9 @@ PROMOTION_REFRESH_INTERVAL_SECONDS = max(
     300, int(os.getenv("PROMOTION_REFRESH_INTERVAL_SECONDS", "3600"))
 )
 SCHEDULED_TASK_QUEUE = "task_scheduled_queue"
+# 读接口每 IP 每分钟配额。前端正常节奏是 system_stats 每 30 秒一次 +
+# 任务进行中 tasks/{id} 每 1.5 秒一次，一分钟约 42 次，留足余量。
+API_READ_RATE_PER_MINUTE = max(1, int(os.getenv("API_READ_RATE_PER_MINUTE", "120")))
 
 # 2. Redis
 redis_host = os.getenv("REDIS_HOST", "localhost")
@@ -176,7 +196,16 @@ def _require_internal_token(authorization: str | None) -> None:
     if not INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="Internal API token is not configured")
     expected = f"Bearer {INTERNAL_API_TOKEN}"
-    if not authorization or not secrets.compare_digest(authorization, expected):
+    # compare_digest 对含非 ASCII 字符的 str 会抛 TypeError，而 Authorization 头
+    # 完全由调用方控制 —— 线上日志里已出现过因此返回 500 的 traceback。
+    # 先编码成 bytes 再比较，让这种请求正常落到 401。
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        supplied = authorization.encode("utf-8")
+    except (UnicodeError, AttributeError):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not secrets.compare_digest(supplied, expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -216,6 +245,20 @@ async def anti_abuse_middleware(request: Request, call_next):
             status_code=503,
             content={"status": "maintenance", "msg": "系统维护中，请稍后重试"},
         )
+
+    # 未鉴权的读接口也要有节流。/api/system_stats 会跑 5 条 SQL，
+    # 线上单 IP 已经打进去 7554 次，而此前限流只覆盖下面两个写入口。
+    # 读接口用宽松得多的配额，只挡住明显的滥用。
+    if path.startswith("/api/") and request.url.path not in {"/api/deposit", "/api/session"}:
+        read_key = f"rate_read:{request.client.host}"
+        read_count = r.incr(read_key)
+        if read_count == 1:
+            r.expire(read_key, 60)
+        if read_count > API_READ_RATE_PER_MINUTE:
+            return JSONResponse(
+                status_code=429,
+                content={"status": "rate_limited", "msg": "⏳ 请求过于频繁，请稍后重试"},
+            )
 
     # 对提交任务和密码换取会话令牌的入口统一限流。
     if request.url.path in {"/api/deposit", "/api/session"} and request.method == "POST":
@@ -368,7 +411,7 @@ async def health_live():
 
 
 @app.get("/health/ready")
-async def health_ready():
+def health_ready():
     try:
         r.ping()
         with connect(DB_PATH) as conn:
@@ -378,7 +421,7 @@ async def health_ready():
     return {"status": "ready"}
 
 @app.post("/api/deposit")
-async def deposit(account: Account, request: Request):
+def deposit(account: Account, request: Request):
     """
     提交任务接口
 
@@ -431,7 +474,7 @@ async def deposit(account: Account, request: Request):
     }
 
 @app.post("/api/delete_account")
-async def delete_account(authorization: str | None = Header(default=None)):
+def delete_account(authorization: str | None = Header(default=None)):
     token = _bearer_token(authorization)
     account = account_for_token(DB_PATH, token)
     if not account:
@@ -444,7 +487,7 @@ async def delete_account(authorization: str | None = Header(default=None)):
 
 # Worker 专用的核弹接口（无需密码，直接销毁）
 @app.post("/api/nuke_account")
-async def nuke_account(req: NukeRequest, authorization: str | None = Header(default=None)):
+def nuke_account(req: NukeRequest, authorization: str | None = Header(default=None)):
     _require_internal_token(authorization)
     print(f"Worker requested invalid-account deletion: account={account_ref(req.email)}")
     try:
@@ -455,7 +498,7 @@ async def nuke_account(req: NukeRequest, authorization: str | None = Header(defa
 
 
 @app.post("/api/admin/unban")
-async def unban_ip(req: UnbanRequest, authorization: str | None = Header(default=None)):
+def unban_ip(req: UnbanRequest, authorization: str | None = Header(default=None)):
     _require_internal_token(authorization)
     removed = r.delete(
         f"ban:{req.ip}",
@@ -468,7 +511,7 @@ async def unban_ip(req: UnbanRequest, authorization: str | None = Header(default
 
 
 @app.get("/api/admin/metrics")
-async def admin_metrics(authorization: str | None = Header(default=None)):
+def admin_metrics(authorization: str | None = Header(default=None)):
     _require_internal_token(authorization)
     with connect(DB_PATH) as conn:
         task_states = {
@@ -560,7 +603,7 @@ async def get_status(email: str):
 
 
 @app.get("/api/tasks/{task_id}")
-async def get_task(task_id: str, authorization: str | None = Header(default=None)):
+def get_task(task_id: str, authorization: str | None = Header(default=None)):
     token = _bearer_token(authorization)
     row = task_for_token(DB_PATH, task_id, token)
     if not row:
@@ -595,7 +638,7 @@ async def get_task(task_id: str, authorization: str | None = Header(default=None
     }
 
 @app.post("/api/confirm_success")
-async def save_account(
+def save_account(
     request: TaskRequest, authorization: str | None = Header(default=None)
 ):
     token = _bearer_token(authorization)
@@ -610,7 +653,7 @@ async def save_account(
 
 
 @app.post("/api/session")
-async def create_session(account: Account):
+def create_session(account: Account):
     cipher = get_cipher()
     if not verify_account_password(DB_PATH, cipher, account.email, account.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -618,24 +661,24 @@ async def create_session(account: Account):
 
 
 @app.post("/api/query")
-async def query_logs(authorization: str | None = Header(default=None)):
+def query_logs(authorization: str | None = Header(default=None)):
     token = _bearer_token(authorization)
     account = account_for_token(DB_PATH, token)
     if not account:
         raise HTTPException(status_code=401, detail="Invalid account token")
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "SELECT game_title, claim_time, image_url FROM logs WHERE email=? ORDER BY id DESC",
-        (account["email"],),
-    )
-    rows = c.fetchall()
-    conn.close()
+    # 此前是裸 sqlite3.connect（busy_timeout 只有默认 5 秒），且 fetchall 抛异常时
+    # conn.close() 不会执行、连接泄漏。改用统一的 connect()（busy_timeout 30 秒 + WAL），
+    # 并用 closing 保证异常路径也关闭。
+    with closing(connect(DB_PATH)) as conn:
+        rows = conn.execute(
+            "SELECT game_title, claim_time, image_url FROM logs WHERE email=? ORDER BY id DESC",
+            (account["email"],),
+        ).fetchall()
     logs = [{"game": r[0], "time": r[1], "image": f"/images/{r[2]}" if r[2] else "/images/default.jpg"} for r in rows]
     return {"status": "success", "data": logs}
 
 @app.post("/api/report_game")
-async def report_game(log: GameLog, authorization: str | None = Header(default=None)):
+def report_game(log: GameLog, authorization: str | None = Header(default=None)):
     _require_internal_token(authorization)
     with connect(DB_PATH) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -919,7 +962,7 @@ async def stop_scheduler():
 # --- 📊 系统状态与免费游戏 API ---
 
 @app.get("/api/system_stats")
-async def get_system_stats():
+def get_system_stats():
     """
     获取系统统计数据：
     - 托管账号总数
@@ -928,7 +971,7 @@ async def get_system_stats():
     - 累计领取数量
     - 系统运行时间
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     c = conn.cursor()
 
     # 托管账号总数（数据库记录 + 偏移量）
@@ -958,9 +1001,33 @@ async def get_system_stats():
     processing_count = c.execute(
         "SELECT COUNT(*) FROM task_runs WHERE state IN ('queued', 'running', 'deferred')"
     ).fetchone()[0]
+    oldest_active = c.execute(
+        """
+        SELECT CAST((julianday('now') - julianday(MIN(created_at))) * 86400 AS INTEGER)
+        FROM task_runs
+        WHERE state IN ('queued', 'running', 'deferred')
+        """
+    ).fetchone()[0]
     conn.close()
 
     queue_length = r.llen("task_queue")
+
+    # worker 是否还活着。此前前端只要这个接口返回 200 就点亮"服务状态正常"绿灯，
+    # worker 挂掉时页面依然全绿、用户照常提交、任务永远躺在队列里。
+    heartbeat = r.get("worker:heartbeat")
+    try:
+        heartbeat_age = (
+            max(0, int(datetime.now().timestamp() - float(heartbeat))) if heartbeat else None
+        )
+    except (TypeError, ValueError):
+        heartbeat_age = None
+
+    warp_healthy = warp_total = None
+    raw_summary = r.get("warp:health:summary")
+    if raw_summary:
+        with suppress(ValueError, TypeError):
+            summary = json.loads(raw_summary)
+            warp_healthy, warp_total = summary.get("healthy"), summary.get("total")
 
     return {
         "total_accounts": total_accounts,
@@ -970,6 +1037,10 @@ async def get_system_stats():
         "total_claims": total_claims,
         "queue_length": queue_length,
         "processing_count": processing_count,
+        "oldest_active_seconds": oldest_active,
+        "worker_heartbeat_age_seconds": heartbeat_age,
+        "warp_healthy": warp_healthy,
+        "warp_total": warp_total,
         "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+from contextlib import suppress
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -83,11 +84,23 @@ class CredentialCipher:
             raise CredentialError("Credential cannot be rotated") from exc
 
 
+_WAL_READY = False
+
+
 def connect(db_path: str) -> sqlite3.Connection:
+    global _WAL_READY
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
+    if not _WAL_READY:
+        # 默认的 delete 模式下写事务会拿 EXCLUSIVE 锁、阻塞所有读者，
+        # 而 web 与 worker 是两个容器并发读写同一个库文件。
+        # WAL 是持久化在库文件头里的，设置一次即对两端永久生效。
+        with suppress(sqlite3.Error):
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        _WAL_READY = True
     return conn
 
 
