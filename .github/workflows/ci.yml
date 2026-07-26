@@ -16,39 +16,38 @@ jobs:
           python-version: "3.12"
 
       - name: 安装依赖
-        # 只装跑测试真正需要的部分。完整的 worker 依赖（camoufox / playwright /
-        # hcaptcha-challenger）体积上 GB 且需要下载浏览器，不适合放进 CI；
-        # 依赖它们的测试会在下一步被跳过并明确列出。
+        # 只装轻量依赖。真正装不进 CI 的是浏览器栈（camoufox / playwright /
+        # hcaptcha-challenger）—— 体积上 GB 且要下载浏览器二进制。
+        # 依赖它们的测试在下一步里显式排除，不靠"跑挂了就当作跳过"的猜测。
         run: |
           python -m pip install --upgrade pip
-          pip install pytest fakeredis httpx pydantic pydantic-settings \
-                      cryptography redis loguru pytz tenacity ruff black
+          pip install pytest fakeredis \
+                      fastapi uvicorn jinja2 python-multipart apscheduler httpx requests redis \
+                      pydantic pydantic-settings cryptography loguru pytz tenacity \
+                      ruff black
 
       - name: 静态检查
+        # 首次接入，先只报告不拦截；等存量问题清理完再去掉 continue-on-error。
+        continue-on-error: true
         run: |
-          ruff check . || true          # 首次接入先不拦，只暴露问题
-          black --check . || true
+          ruff check .
+          black --check .
 
       - name: 单元测试
-        # 逐个模块跑，未满足依赖的模块只跳过而不让整体失败 ——
-        # 这样至少能守住不依赖浏览器栈的那部分（provider_router、secure_store、
-        # claim_cycles、migration 等），后续再逐步收紧。
+        # 排除的 5 个文件都直接或间接 import 浏览器栈：
+        #   test_captcha_solver   -> hcaptcha_challenger
+        #   test_checkout_results -> services.epic_games_service -> hcaptcha_challenger
+        #   test_deploy_modes     -> app.deploy -> camoufox
+        #   test_login_captcha    -> services.epic_authorization_service -> app.settings -> hcaptcha_challenger
+        #   test_provider_router  -> app.settings -> hcaptcha_challenger
+        # 它们要在 worker 镜像里跑，方式见 AGENTS.md。
         run: |
-          set +e
-          failed=0
-          for f in tests/test_*.py; do
-            echo "::group::$f"
-            python -m pytest "$f" -q
-            code=$?
-            if [ $code -eq 0 ]; then echo "PASS $f"
-            elif python -c "import sys; sys.exit(0)" && python -m pytest "$f" -q 2>&1 | grep -q "ModuleNotFoundError"; then
-              echo "SKIP $f (缺少浏览器栈依赖)"
-            else
-              echo "FAIL $f"; failed=1
-            fi
-            echo "::endgroup::"
-          done
-          exit $failed
+          python -m pytest tests -q \
+            --ignore=tests/test_captcha_solver.py \
+            --ignore=tests/test_checkout_results.py \
+            --ignore=tests/test_deploy_modes.py \
+            --ignore=tests/test_login_captcha.py \
+            --ignore=tests/test_provider_router.py
         env:
           DATA_DIR: /tmp/epic-kiosk-ci
           INTERNAL_API_TOKEN: ci-test-token

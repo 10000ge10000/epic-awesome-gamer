@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import shutil
+from contextlib import closing
 import sqlite3
 import sys
 import tempfile
@@ -16,6 +17,28 @@ from cryptography.fernet import Fernet
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.secure_store import normalize_email, safe_profile_path
+
+
+def checkpoint_wal(db_path: Path) -> None:
+    """把 WAL 里的内容折叠回主库文件，并确认没有别的连接在写。
+
+    app/secure_store.connect() 现在统一开启 WAL，最近的写入可能只存在于 -wal
+    文件里。而本脚本是用 db_path.read_bytes() 整文件读取来做加密备份的 ——
+    不先 checkpoint 就会备出一个缺最新数据的库，这是灾难恢复路径上的静默数据丢失。
+
+    此前这里用的是"只要 -wal/-shm 文件存在就拒绝运行"。开启 WAL 之后这个判据不再
+    成立：SQLite 只在最后一个连接干净关闭时才删除这两个文件，于是检查会随着当时
+    是否恰好有连接打开而间歇性触发，比稳定失败更难排查。改为主动 checkpoint，
+    只有真的拿不到锁（说明还有活跃写者）才报错。
+    """
+    if not db_path.exists():
+        return
+    with closing(sqlite3.connect(str(db_path), timeout=30)) as conn:
+        busy, _log, _checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if busy:
+        raise RuntimeError(
+            "WAL checkpoint blocked by another connection; stop services and retry"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -156,9 +179,7 @@ def main() -> int:
         raise SystemExit("--maintenance-confirmed is required with --apply")
     if not args.current_backup:
         raise SystemExit("--current-backup is required with --apply")
-    for suffix in ("-wal", "-shm"):
-        if Path(f"{db_path}{suffix}").exists():
-            raise RuntimeError(f"Database sidecar exists; stop services and checkpoint first: {suffix}")
+    checkpoint_wal(db_path)
 
     encrypted_backup(db_path, Path(args.current_backup).resolve(), key)
     moves = move_profiles_back(user_data, manifest)
