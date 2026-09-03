@@ -87,6 +87,7 @@ class TwoCaptchaTokenSolver:
         page_url: str,
         timeout_seconds: int = 180,
         poll_interval_seconds: int = 5,
+        invisible: bool = False,
         session: Any | None = None,
     ):
         self.api_key = api_key.strip()
@@ -94,6 +95,10 @@ class TwoCaptchaTokenSolver:
         self.page_url = page_url.strip()
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
+        # Epic 的 hCaptcha 是 size=invisible（实测三份现场一致）。2captcha 需要
+        # 显式 invisible=1，否则按普通 hCaptcha 提交，出票 token 很可能被 Epic
+        # 判无效。默认 False 保持原行为不变。
+        self.invisible = bool(invisible)
         self.session = session or requests.Session()
 
     async def solve(self) -> CaptchaSolveResult:
@@ -112,16 +117,19 @@ class TwoCaptchaTokenSolver:
         return await asyncio.to_thread(self._solve_sync)
 
     def _solve_sync(self) -> CaptchaSolveResult:
+        payload = {
+            "key": self.api_key,
+            "method": "hcaptcha",
+            "sitekey": self.site_key,
+            "pageurl": self.page_url,
+            "json": 1,
+        }
+        if self.invisible:
+            payload["invisible"] = 1
         try:
             submit = self.session.post(
                 self.IN_URL,
-                data={
-                    "key": self.api_key,
-                    "method": "hcaptcha",
-                    "sitekey": self.site_key,
-                    "pageurl": self.page_url,
-                    "json": 1,
-                },
+                data=payload,
                 timeout=30,
             )
             submit.raise_for_status()
@@ -185,11 +193,19 @@ class TwoCaptchaTokenSolver:
         )
 
 
-async def inject_hcaptcha_token(page: Page, token: str) -> None:
-    """Inject a provider token and unblock Epic's login form."""
+async def inject_hcaptcha_token(page: Page, token: str, container: str = "") -> None:
+    """Inject a provider token and unblock Epic's login form.
+
+    container 取自挑战 frame URL 的 challenge-container 参数，例如
+    h_captcha_challenge_email_exists_prod。原实现把三处容器名硬编码为
+    login_prod，对 email_exists_prod / account_management_prod 场景无效 ——
+    token 注入了但 talon 遮罩不会被关掉，可能继续挡住 #sign-in 的点击。
+    不传时回落 login_prod，保持原行为。
+    """
+    suffix = container.removeprefix("h_captcha_challenge_").strip() or "login_prod"
     await page.evaluate(
         """
-        (token) => {
+        ({token, suffix}) => {
           const touched = new Set();
           const writeToken = (field) => {
             if (!field || touched.has(field)) {
@@ -241,14 +257,14 @@ async def inject_hcaptcha_token(page: Page, token: str) -> None:
             signInButton.dispatchEvent(new Event('change', { bubbles: true }));
           }
 
-          const talonOverlay = document.querySelector('#talon_container_login_prod');
+          const talonOverlay = document.querySelector('#talon_container_' + suffix);
           if (talonOverlay) {
             talonOverlay.style.display = 'none';
             talonOverlay.style.visibility = 'hidden';
             talonOverlay.setAttribute('aria-hidden', 'true');
           }
 
-          const challengeContainer = document.querySelector('#h_captcha_challenge_login_prod');
+          const challengeContainer = document.querySelector('#h_captcha_challenge_' + suffix);
           if (challengeContainer) {
             challengeContainer.style.display = 'none';
             challengeContainer.style.visibility = 'hidden';
@@ -256,7 +272,7 @@ async def inject_hcaptcha_token(page: Page, token: str) -> None:
 
           if (window.talon && typeof window.talon.close === 'function') {
             try {
-              window.talon.close('login_prod');
+              window.talon.close(suffix);
             } catch (_error) {}
           }
 
@@ -266,5 +282,5 @@ async def inject_hcaptcha_token(page: Page, token: str) -> None:
           });
         }
         """,
-        token,
+        {"token": token, "suffix": suffix},
     )

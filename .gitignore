@@ -69,3 +69,11 @@ data/kiosk.db-wal
 data/kiosk.db-shm
 data/*.db-wal
 data/*.db-shm
+
+# 备份文件与临时配置
+*.bak*
+*.bak-*
+.env*
+!.env.example
+.claude/
+data/*.py

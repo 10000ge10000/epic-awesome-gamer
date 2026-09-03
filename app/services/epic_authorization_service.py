@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import time
+import urllib.parse
 from contextlib import suppress
 from enum import Enum
 
@@ -24,6 +25,19 @@ URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 LOGIN_FAST_RESULT_TIMEOUT = 15
 LOGIN_AFTER_CAPTCHA_TIMEOUT = 60
 LOGIN_AFTER_RESUBMIT_TIMEOUT = 45
+
+
+async def _await_with_cleanup(awaitable, timeout: float):
+    """超时后显式取消并等待底层任务，避免登录阶段 Future 泄漏。"""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.wait_for(task, timeout=timeout)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        with suppress(BaseException):
+            await task
+        raise
 
 
 class ErrorType(Enum):
@@ -58,6 +72,12 @@ class ErrorType(Enum):
 
     # 验证码需要人工处理 - hCaptcha 动物拖拽题自动识别不稳定
     CAPTCHA_MANUAL_REQUIRED = "captcha_manual_required"
+
+    # Epic 已收到 hCaptcha token 但判定无效 - 语义是"请刷新页面重试"，可自动重试
+    CAPTCHA_INVALID = "captcha_invalid"
+
+    # 登录表单未按预期变为可交互（多为邮箱步骤 hCaptcha 门禁挡住按钮）- 可自动重试
+    LOGIN_PAGE_TIMEOUT = "login_page_timeout"
 
     # 登录超时 - 可能是网络问题，建议稍后重试
     LOGIN_TIMEOUT = "login_timeout"
@@ -190,6 +210,58 @@ class EpicAuthorization:
 
         logger.warning("⚠️ 等待 hCaptcha challenge/payload 超时，继续交给 AgentV 兜底处理")
 
+    async def _wait_for_email_step_gate(self, timeout_ms: int = 45000) -> bool:
+        """等待邮箱步骤的 hCaptcha 门禁放行，直到密码步骤可交互。
+
+        Epic 会在邮箱步骤下发 email_exists_prod 挑战：talon 覆盖层以
+        z-index 100000 铺满整页，#continue 停在 disabled+loading 态，
+        密码步骤永不渲染，于是 #sign-in 在 DOM 里根本不存在。
+
+        原实现在 click("#sign-in") 之后才创建 AgentV，挑战出现在解题器诞生
+        之前 —— 死等 30s 超时。这里在邮箱步骤就先把门禁处理掉：invisible
+        模式多数会静默放行，只有真下发可见挑战时才需要解题器。
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        agent: AgentV | None = None
+        solve_attempts = 0
+
+        while time.monotonic() < deadline:
+            # 判据必须是 #sign-in 是否出现，不能用 #password 是否可见 ——
+            # Epic 的 SPA 把密码框预渲染进 DOM，门禁未放行时它同样可见，
+            # 拿它当判据会立刻假阳性通过，然后死在 click("#sign-in") 上。
+            with suppress(Exception):
+                if await self.page.locator("#sign-in").first.is_visible(timeout=500):
+                    return True
+
+            overlay_visible = False
+            with suppress(Exception):
+                overlay = self.page.locator("[id^='talon_container_']").first
+                if await overlay.count() > 0:
+                    style = (await overlay.get_attribute("style")) or ""
+                    overlay_visible = "visibility: visible" in style
+
+            if overlay_visible and solve_attempts < 2:
+                if agent is None:
+                    logger.warning("⚠️ 邮箱步骤出现 hCaptcha 门禁，提前启动解题器")
+                    agent = AgentV(page=self.page, agent_config=settings)
+                solve_attempts += 1
+                # 先点 checkbox 触发 getcaptcha，再交给解题器；invisible 模式
+                # 下多数会静默放行，此时 solve 会很快返回而不会真的解题。
+                with suppress(Exception):
+                    await self._prepare_hcaptcha_challenge(agent, timeout_ms=8000)
+                result = await HCaptchaChallengerSolver(agent).solve()
+                if result.ok:
+                    logger.success("✅ 邮箱步骤验证码已通过")
+                else:
+                    logger.warning(
+                        f"邮箱步骤验证码未通过[{solve_attempts}/2]: "
+                        f"{result.signal or result.message}"
+                    )
+
+            await self.page.wait_for_timeout(1000)
+
+        return False
+
     async def _is_animal_pattern_drag_challenge(self) -> bool:
         needle = "put the animal icons into the correct spots to complete the pattern"
         for frame in self.page.frames:
@@ -261,6 +333,29 @@ class EpicAuthorization:
             logger.debug(f"Password-page resubmit check skipped: {err}")
             return False
 
+    async def _detect_hcaptcha_sitekey(self) -> tuple[str, str]:
+        """从当前 hCaptcha frame 的 URL hash 提取 (sitekey, challenge_container)。
+
+        Epic 按步骤下发不同 sitekey，实测三种并存：login_prod 91e4137f… /
+        email_exists_prod 5928de2d… / account_management_prod 4d1171af…，
+        而 .env 的 CAPTCHA_PROVIDER_SITE_KEY 只能写死一个。sitekey 与 pageurl
+        不匹配时打码服务商会判错或返回无效 token，所以必须按当前挑战动态取。
+
+        实测 frame=checkbox-invisible 的 URL 不带 sitekey，只有 frame=challenge
+        带，故优先匹配 challenge。取不到时返回空串，由调用方回落配置值。
+        """
+        for wanted in ("frame=challenge", "frame=checkbox"):
+            for frame in self.page.frames:
+                url = frame.url or ""
+                if "hcaptcha.com" not in url or wanted not in url:
+                    continue
+                params = urllib.parse.parse_qs(url.split("#", 1)[-1])
+                sitekey = (params.get("sitekey") or [""])[0].strip()
+                if sitekey:
+                    container = (params.get("challenge-container") or [""])[0].strip()
+                    return sitekey, container
+        return "", ""
+
     async def _solve_with_provider(self) -> bool:
         provider = (settings.CAPTCHA_PROVIDER or "none").lower()
         if provider in {"", "none", "disabled"}:
@@ -270,9 +365,17 @@ class EpicAuthorization:
             return False
 
         api_key = settings.CAPTCHA_PROVIDER_API_KEY.get_secret_value()
+        detected_key, detected_container = await self._detect_hcaptcha_sitekey()
+        site_key = detected_key or settings.CAPTCHA_PROVIDER_SITE_KEY
+        if detected_key and detected_key != settings.CAPTCHA_PROVIDER_SITE_KEY:
+            logger.info(
+                f"打码 sitekey 动态提取: {site_key} "
+                f"container={detected_container or '-'}"
+                f"（配置值 {settings.CAPTCHA_PROVIDER_SITE_KEY} 与当前步骤不匹配）"
+            )
         solver = TwoCaptchaTokenSolver(
             api_key=api_key,
-            site_key=settings.CAPTCHA_PROVIDER_SITE_KEY,
+            site_key=site_key,
             page_url=self.page.url or "https://www.epicgames.com/id/login",
             timeout_seconds=settings.CAPTCHA_PROVIDER_TIMEOUT,
             poll_interval_seconds=settings.CAPTCHA_PROVIDER_POLL_INTERVAL,
@@ -312,6 +415,11 @@ class EpicAuthorization:
                     # 登录成功，记录 accountId
                     if result.get("accountId"):
                         logger.success(f"✅ 登录 API 返回成功: accountId={result.get('accountId')}")
+                        # 登录 API 本身就是最权威的成功信号，必须入队。
+                        # 此前只有 /id/api/analytics 才入队，而那是第三方分析打点：
+                        # 打点不带 accountId 或被拦时，成功的登录也永远等不到信号，
+                        # 只能靠超时后的页面兜底判定 —— 线上 verify 因此长期误报失败。
+                        self._is_login_success_signal.put_nowait(result)
             elif "/id/api/analytics" in r.url and result.get("accountId"):
                 self._is_login_success_signal.put_nowait(result)
             elif "/account/v2/refresh-csrf" in r.url and result.get("success", False) is True:
@@ -326,6 +434,11 @@ class EpicAuthorization:
             return ErrorType.COOKIE_INVALID
         if "two_factor_authentication.required" in error_code or "two_factor" in error_code:
             return ErrorType.TWO_FACTOR_REQUIRED
+        # Epic 收到了 token 但判定无效（"Incorrect response. Please refresh the page."）。
+        # 与账号本身无关，重试即可能通过，因此单独归类而不是落进 unknown ——
+        # unknown 不在任何重试策略里，会让这类可自愈的失败直接终止。
+        if "captcha_invalid" in error_code:
+            return ErrorType.CAPTCHA_INVALID
         # 兜底之前把原始 errorCode 打出来。此前所有未覆盖的 Epic 错误码都被
         # 静默归为 unknown，线上 unknown 曾是真实失败中占比最大的一类，
         # 但日志里看不出它们究竟是什么 —— 记下来才能持续补全上面的分支。
@@ -380,7 +493,7 @@ class EpicAuthorization:
         if "epicgames.com/account/personal" in current_url:
             logger.success(f"Epic account page reached after {reason}; treating login as successful")
             with suppress(Exception):
-                await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
+                await _await_with_cleanup(self._handle_right_account_validation(), timeout=60)
             return True
 
         with suppress(Exception):
@@ -433,6 +546,14 @@ class EpicAuthorization:
 
             # 2. 点击继续按钮
             await self.page.click("#continue")
+
+            # 2.5 邮箱步骤可能被 hCaptcha 门禁挡住（talon 覆盖层 + #continue
+            # 停在 loading），此时密码步骤根本不会渲染。必须先等门禁放行，
+            # 否则后续 #password / #sign-in 会死等 30s 默认超时。
+            if not await self._wait_for_email_step_gate():
+                logger.error("邮箱步骤的 hCaptcha 门禁未放行，密码步骤未出现")
+                await self._save_login_debug("email_step_gate_blocked")
+                return (False, ErrorType.LOGIN_PAGE_TIMEOUT)
 
             # 3. 输入密码
             password_input = self.page.locator("#password")
@@ -545,7 +666,7 @@ class EpicAuthorization:
                     # 登录成功（无验证码或已通过）
                     if result.get("accountId"):
                         logger.success("✅ 登录成功")
-                        await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
+                        await _await_with_cleanup(self._handle_right_account_validation(), timeout=60)
                         logger.success("✅ 账号验证成功")
                         return (True, ErrorType.SUCCESS)
             except asyncio.CancelledError:
@@ -584,7 +705,7 @@ class EpicAuthorization:
                         )
                         if resubmitted:
                             try:
-                                result = await asyncio.wait_for(
+                                result = await _await_with_cleanup(
                                     result_task,
                                     timeout=LOGIN_AFTER_RESUBMIT_TIMEOUT,
                                 )
@@ -593,12 +714,17 @@ class EpicAuthorization:
                                 await self._save_login_debug("login_timeout_after_resubmit")
                                 return (False, ErrorType.CAPTCHA_UNSOLVED)
                         else:
+                            # hCaptcha 的 invisible 模式在无风险时静默放行，不渲染挑战，
+                            # solver 因等不到 challenge-view 而超时失败；但此时登录往往
+                            # 已经成功。缺少这道确认会把成功的会话误报成人工验证。
+                            if await self._confirm_login_state_from_page("captcha_failed_but_logged_in"):
+                                return (True, ErrorType.SUCCESS)
                             logger.error("Captcha solver ended without success; manual verification is required")
                             return (False, ErrorType.CAPTCHA_MANUAL_REQUIRED)
                     else:
                         captcha_success = True
                         try:
-                            result = await asyncio.wait_for(
+                            result = await _await_with_cleanup(
                                 result_task,
                                 timeout=LOGIN_AFTER_CAPTCHA_TIMEOUT,
                             )
@@ -611,10 +737,10 @@ class EpicAuthorization:
                                 await self._save_login_debug("login_timeout_after_captcha")
                                 return (False, ErrorType.LOGIN_TIMEOUT)
                             try:
-                                result = await asyncio.wait_for(
+                                result = await _await_with_cleanup(
                                     result_task,
                                     timeout=LOGIN_AFTER_RESUBMIT_TIMEOUT,
-                            )
+                                )
                             except asyncio.TimeoutError:
                                 if await self._confirm_login_state_from_page("captcha_success_resubmit"):
                                     return (True, ErrorType.SUCCESS)
@@ -640,7 +766,7 @@ class EpicAuthorization:
                     return (False, mapped_error)
 
                 logger.success("Epic login succeeded")
-                await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
+                await _await_with_cleanup(self._handle_right_account_validation(), timeout=60)
                 logger.success("Epic account validation succeeded")
                 return (True, ErrorType.SUCCESS)
 
@@ -660,6 +786,18 @@ class EpicAuthorization:
             return (False, ErrorType.LOGIN_TIMEOUT)
         except Exception as err:
             logger.warning(f"登录异常: {err}")
+            # Playwright 的元素级操作默认 30s 超时。这类失败的共同含义是
+            # 登录表单没能按预期变为可交互（多为邮箱步骤的 hCaptcha 门禁挡住了
+            # #sign-in / #continue），与账号密码无关，重试即可能通过。
+            # 此前它们全部落进 unknown，而 unknown 不在任何重试策略里 ——
+            # 一类本可自愈的失败反而成了唯一不重试、且提示为"未知错误"的类型。
+            message = str(err)
+            if "Timeout 30000ms exceeded" in message and any(
+                op in message
+                for op in ("Page.click", "Locator.click", "Locator.clear", "Locator.type", "Locator.fill")
+            ):
+                await self._save_login_debug("login_page_interaction_timeout")
+                return (False, ErrorType.LOGIN_PAGE_TIMEOUT)
             return (False, ErrorType.UNKNOWN)
         finally:
             # 登录阶段的 AgentV 监听器不能泄漏到商品页，否则会继续处理

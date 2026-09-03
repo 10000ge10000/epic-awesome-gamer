@@ -18,7 +18,7 @@ Epic Kiosk 是一个基于 Docker 的 Epic Games 每周免费游戏自动领取�
 ## 特性
 
 - **多账号托管**：在 Web 控制台提交 Epic 邮箱和密码，后续由 Worker 自动处理登录与领取。
-- **验证码处理**：默认使用 SiliconFlow 三模型链，支持会话降级、跨任务熔断和外部验证码服务商兜底。
+- **高可用验证码处理**：支持以 **Google Gemini 3.5 Flash Lite** 作为主力模型（毫秒级响应，平均 1.1s~1.5s），并由 **SiliconFlow**（GLM-4.5V / Kimi）提供自动熔断降级兜底，兼具极速破解与断网容灾能力。
 - **多游戏流程**：只有本周期全部周免均确认 `claimed/owned` 才会标记账号完成，失败项会延迟补跑。
 - **周期调度**：Web 每小时检查当前周免集合；新周期按 5 个账号一批、每批间隔 10 分钟；周期内新增账号会自动补排，同周期已完成账号不会重复领取。
 - **登录与领取分离**：托管账号时只验证登录并保存账号，实际领取由后续周免周期任务执行。
@@ -29,7 +29,7 @@ Epic Kiosk 是一个基于 Docker 的 Epic Games 每周免费游戏自动领取�
 
 ### 手动部署（推荐）
 
-默认推荐 SiliconFlow，也兼容 NVIDIA 和其他 OpenAI-compatible API 提供商。
+默认推荐 **Google Gemini 3.5 Flash Lite**（极速）搭配 **SiliconFlow** 降级兜底，也兼容 NVIDIA 和其他 OpenAI-compatible API 提供商。
 
 ```bash
 git clone https://github.com/10000ge10000/epic-kiosk.git
@@ -42,9 +42,9 @@ nano .env
 
 ```bash
 sudo install -d -m 0700 -o 1002 -g 1002 /etc/epic-kiosk/secrets
-sudo install -m 0600 -o 1002 -g 1002 /dev/null /etc/epic-kiosk/secrets/captcha_nvidia_api_key
+sudo install -m 0600 -o 1002 -g 1002 /dev/null /etc/epic-kiosk/secrets/captcha_gemini_api_key
 sudo install -m 0600 -o 1002 -g 1002 /dev/null /etc/epic-kiosk/secrets/captcha_siliconflow_api_key
-sudo nano /etc/epic-kiosk/secrets/captcha_nvidia_api_key
+sudo nano /etc/epic-kiosk/secrets/captcha_gemini_api_key
 sudo nano /etc/epic-kiosk/secrets/captcha_siliconflow_api_key
 ```
 
@@ -82,44 +82,51 @@ chmod +x install.sh
 
 ### API Provider
 
-项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。当前默认使用 SiliconFlow；连接超时、429 或 5xx 会按模型链故障转移。
+项目通过 OpenAI-compatible `/v1/chat/completions` 接口调用模型。支持在多个提供商之间按优先级自动故障转移与熔断。
 
 | Provider | API_BASE_URL | 说明 |
 | --- | --- | --- |
-| `siliconflow` | `https://api.siliconflow.cn/v1` | 当前默认推荐，用于 hCaptcha 视觉识别。 |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/openai/v1` | **推荐主力**。Gemini 3.5 Flash Lite 极速响应（~1.2s），抗超时风控。 |
+| `siliconflow` | `https://api.siliconflow.cn/v1` | **推荐备用/兜底**。GLM-4.5V / Kimi 多模型链，用于 Google 频控时自动无感切入。 |
 | `nvidia` | `https://integrate.api.nvidia.com/v1` | 兼容旧版部署配置。 |
 | `custom` | 自定义 `/v1` 地址 | 适合自建 OpenAI-compatible 网关。 |
 
-核心环境变量：
+推荐的双保险环境变量配置（示例）：
 
 ```env
 INTERNAL_API_TOKEN_PATH=/etc/epic-kiosk/secrets/internal_api_token
 EPIC_CREDENTIAL_KEYS_PATH=/etc/epic-kiosk/secrets/epic_credential_keys
-CAPTCHA_NVIDIA_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_nvidia_api_key
+CAPTCHA_GEMINI_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_gemini_api_key
 CAPTCHA_SILICONFLOW_API_KEY_PATH=/etc/epic-kiosk/secrets/captcha_siliconflow_api_key
-API_PROVIDER=siliconflow
-API_BASE_URL=https://api.siliconflow.cn/v1
-CAPTCHA_PRIMARY_BASE_URL=https://api.siliconflow.cn/v1
-CAPTCHA_PRIMARY_MODEL=zai-org/GLM-4.5V
+
+# 主力模型：Google Gemini 3.5 Flash Lite
+API_PROVIDER=google
+API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/v1
+PRIMARY_MODEL=gemini-3.5-flash-lite
+CAPTCHA_PRIMARY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/v1
+CAPTCHA_PRIMARY_MODEL=gemini-3.5-flash-lite
+CAPTCHA_PRIMARY_API_KEY_FILE=/run/secrets/captcha_gemini_api_key
+
+# 备用降级链：SiliconFlow 兜底
 CAPTCHA_SECONDARY_BASE_URL=https://api.siliconflow.cn/v1
-CAPTCHA_SECONDARY_MODEL=moonshotai/Kimi-K2.7-Code
+CAPTCHA_SECONDARY_MODEL=zai-org/GLM-4.5V
 CAPTCHA_TERTIARY_BASE_URL=https://api.siliconflow.cn/v1
-CAPTCHA_TERTIARY_MODEL=Pro/moonshotai/Kimi-K2.6
+CAPTCHA_TERTIARY_MODEL=moonshotai/Kimi-K2.7-Code
 CAPTCHA_TOTAL_API_BUDGET=150
 CAPTCHA_PROVIDER=none
 ```
 
 `INTERNAL_API_TOKEN` 只用于 `web` 与 `worker` 的内部接口认证，必须是独立随机值，不能与模型 API Key 共用。Secret 文件应保持 `0600`，不要把真实内容写入 `.env`。
 
-验证码模型按以下顺序故障转移：
+模型按以下顺序故障转移：
 
 ```text
-zai-org/GLM-4.5V
-  -> moonshotai/Kimi-K2.7-Code
-  -> Pro/moonshotai/Kimi-K2.6
+Google (gemini-3.5-flash-lite)
+  -> SiliconFlow (zai-org/GLM-4.5V)
+  -> SiliconFlow (moonshotai/Kimi-K2.7-Code)
 ```
 
-三个模型均通过 SiliconFlow 的 OpenAI-compatible 接口调用。API Key 建议继续通过仓库外的 Secret 文件注入，不要写入 Git、README 或运行日志。`CAPTCHA_MODEL` 和 `CAPTCHA_MODEL_FALLBACK` 仍可用于兼容旧部署，但新部署建议使用上述 `CAPTCHA_PRIMARY_*`、`CAPTCHA_SECONDARY_*` 和 `CAPTCHA_TERTIARY_*` 配置。
+API Key 统一通过 Docker Secrets 机制安全注入容器内部 `/run/secrets/`，杜绝密钥泄露风险。
 
 ### WARP 出口
 

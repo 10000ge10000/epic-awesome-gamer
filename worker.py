@@ -32,7 +32,18 @@ from app.secure_store import (
 
 # Redis
 redis_host = os.getenv("REDIS_HOST", "localhost")
-r = redis.Redis(host=redis_host, port=6379, decode_responses=True)
+REDIS_SOCKET_TIMEOUT_SECONDS = max(
+    15, int(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "20"))
+)
+# BLPOP 的服务端等待时间是 10 秒，客户端 socket timeout 必须更长，
+# 否则空闲队列时会把正常的 nil 等待误判成 TimeoutError。
+r = redis.Redis(
+    host=redis_host,
+    port=6379,
+    decode_responses=True,
+    socket_connect_timeout=5,
+    socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+)
 WEB_BASE_URL = "http://web:8000"
 WEB_API_URL = f"{WEB_BASE_URL}/api/report_game"
 NUKE_API_URL = f"{WEB_BASE_URL}/api/nuke_account" # 核弹接口
@@ -48,6 +59,13 @@ TASK_SOFT_TIMEOUT_SECONDS = int(os.getenv("TASK_SOFT_TIMEOUT_SECONDS", "480"))
 # 而系统里并没有任何解锁入口。
 TASK_LOCK_SECONDS = int(os.getenv("TASK_LOCK_SECONDS", "9000"))
 TASK_MIN_GAME_BUDGET_SECONDS = int(os.getenv("TASK_MIN_GAME_BUDGET_SECONDS", "180"))
+BROWSER_TASK_CONCURRENCY = max(1, int(os.getenv("BROWSER_TASK_CONCURRENCY", "1")))
+ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS = max(
+    0, int(os.getenv("ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS", "60"))
+)
+PAGE_TIMEOUT_RETRY_DELAY_SECONDS = max(
+    60, int(os.getenv("PAGE_TIMEOUT_RETRY_DELAY_SECONDS", "600"))
+)
 
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -79,7 +97,7 @@ RETRY_QUEUE = "task_retry_queue"
 SCHEDULED_TASK_QUEUE = "task_scheduled_queue"
 COOKIE_INVALID_MAX_RETRIES = int(os.getenv("COOKIE_INVALID_MAX_RETRIES", "1"))
 WARP_RESTART_COOLDOWN_SECONDS = int(os.getenv("WARP_RESTART_COOLDOWN_SECONDS", "300"))
-TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "5"))
+TASK_SPACING_SECONDS = int(os.getenv("TASK_SPACING_SECONDS", "10"))
 PID_WARN_THRESHOLD = int(os.getenv("PID_WARN_THRESHOLD", "250"))
 ZOMBIE_WARN_THRESHOLD = int(os.getenv("ZOMBIE_WARN_THRESHOLD", "1"))
 RESIDUAL_PROCESS_PATTERNS = (
@@ -91,6 +109,14 @@ RESIDUAL_PROCESS_PATTERNS = (
     "playwright",
 )
 _sigchld_seen = False
+WORKER_METRICS: dict[str, int] = {
+    "page_goto_timeout_total": 0,
+    "unhandled_asyncio_future_total": 0,
+}
+
+
+def _metric_inc(name: str, value: int = 1) -> None:
+    WORKER_METRICS[name] = WORKER_METRICS.get(name, 0) + value
 
 
 def task_redis_key(run_id: str, field: str) -> str:
@@ -190,7 +216,8 @@ def log_worker_boot_info() -> None:
         f"pid={os.getpid()} ppid={os.getppid()} "
         f"pid1={pid1_cmdline or 'unknown'} "
         f"pids.max={_read_text('/sys/fs/cgroup/pids.max')} "
-        f"cpu.max={_read_text('/sys/fs/cgroup/cpu.max')}"
+        f"cpu.max={_read_text('/sys/fs/cgroup/cpu.max')} "
+        f"browser_task_concurrency={BROWSER_TASK_CONCURRENCY}"
     )
     log_worker_runtime_health("startup")
 
@@ -597,12 +624,23 @@ def schedule_failure_retry(task_data: dict, error_type: str, warp_index: int | N
     # 重建 2.84GB 的镜像，行为却纹丝不动。这四个变量已一并删除。
     # 如需调整重试策略，直接改这里的元组：(最大重试次数, 延迟秒数, 中文标签)。
     policies = {
+        # Epic 判 token 无效，与账号无关，重试即可能通过。延迟必须短：
+        # retry_delay 期间 retry_pending 存在，主循环 finally 就不删 task_lock，
+        # 用户会看到「该账号有任务正在执行中」而无法重新提交。120s 只锁约 2 分钟。
+        "captcha_invalid": (1, 120, "验证码被 Epic 拒绝"),
+        # 登录表单未变可交互，多为邮箱步骤 hCaptcha 门禁。同样必须短延迟。
+        "login_page_timeout": (1, 180, "登录页面未能正常加载"),
         "captcha_failed": (1, 7200, "验证码失败"),
         "captcha_unsolved": (1, 7200, "验证码未能识别"),
         "provider_timeout": (2, (900, 3600), "验证码服务暂时不可用"),
         "network_timeout": (2, (600, 1800), "网络连接超时"),
         "driver_crash": (2, (600, 1800), "浏览器驱动断连"),
+        "page_timeout": (1, PAGE_TIMEOUT_RETRY_DELAY_SECONDS, "页面导航超时"),
         "task_deadline": (1, 900, "任务软期限已到"),
+        # 结账确认失败（Mechanism C）：非确定性的「点击 CTA → Epic 偶发不创建
+        # 结账 iframe」。与账号/网络无关，同一账号同游戏时好时坏，值得低频补跑一次。
+        # 仅 1 次，避免无限重试放大 WARP 出口负载。
+        "checkout_failed": (1, 1800, "结账确认失败"),
     }
     if error_type not in policies:
         return False
@@ -971,6 +1009,18 @@ ERROR_TYPE_MESSAGES = {
         "hint": "系统仅会低频补跑一次，仍失败时需要人工处理",
         "nuke": False,
     },
+    # Epic 收到 token 但判定无效，与账号本身无关
+    "captcha_invalid": {
+        "status": "⚠️ 验证码被 Epic 拒绝",
+        "hint": "Epic 判定本次验证码无效，系统会在约 2 分钟后自动重试一次，无需重复提交",
+        "nuke": False,
+    },
+    # 登录表单未按预期变为可交互，多为邮箱步骤的 hCaptcha 门禁
+    "login_page_timeout": {
+        "status": "⚠️ 登录页面未能正常加载",
+        "hint": "Epic 登录页的验证码门禁挡住了提交按钮，与账号密码无关。系统会在约 3 分钟后自动重试一次，无需重复提交",
+        "nuke": False,
+    },
     # 验证码需要人工处理
     "captcha_manual_required": {
         "status": "⚠️ 需要人工完成验证码",
@@ -999,6 +1049,11 @@ ERROR_TYPE_MESSAGES = {
     "driver_crash": {
         "status": "⚠️ 浏览器驱动断连",
         "hint": "系统会稍后自动重试；若频繁出现，请联系管理员查看 Worker 日志",
+        "nuke": False,
+    },
+    "page_timeout": {
+        "status": "⚠️ 页面导航超时",
+        "hint": "本次任务已停止重复点击，系统将在稍后低频重试",
         "nuke": False,
     },
     # 账号开启了两步验证
@@ -1429,8 +1484,11 @@ def run_task(task_data):
                 match = re.search(r"GAME_ERROR:(\w+)", line)
                 if match:
                     game_error = match.group(1)
-                    if game_error == "unknown_error" and final_error_type == "driver_crash":
-                        game_error = "driver_crash"
+                    if game_error == "unknown_error" and final_error_type in {
+                        "driver_crash",
+                        "page_timeout",
+                    }:
+                        game_error = final_error_type
                     final_error_type = game_error
                     print(f"🎮 检测到游戏收集错误: {game_error}")
 
@@ -1492,7 +1550,12 @@ def run_task(task_data):
                 set_task_feedback(task_data, status="⚠️ 找不到下单按钮")
                 has_critical_error = True
 
-            if "Timeout 30000ms exceeded" in line:
+            if "Page.goto: Timeout" in line or re.search(r"Page\.goto: Timeout \d+ms exceeded", line):
+                final_error_type = "page_timeout"
+                _metric_inc("page_goto_timeout_total")
+                set_task_feedback(task_data, status="⚠️ 页面导航超时，稍后低频重试")
+                has_critical_error = True
+            elif "Timeout 30000ms exceeded" in line:
                 set_task_feedback(task_data, status="⚠️ 操作超时，重试中...")
                 has_critical_error = True
 
@@ -1564,12 +1627,37 @@ def run_task(task_data):
             schedule_failure_retry(task_data, final_error_type, warp_index)
             return
 
-        if final_error_type in {"provider_timeout", "captcha_failed", "captcha_unsolved"} and not is_fatal_failure:
+        # captcha_invalid / login_page_timeout 同属"与账号无关、重试即可能通过"，
+        # 一并走延迟重试。注意：只往 policies 加条目是不够的 —— 必须同时出现在
+        # 这里的调度集合里，否则 schedule_failure_retry 根本不会被调用。
+        if final_error_type in {
+            "provider_timeout",
+            "captcha_failed",
+            "captcha_unsolved",
+            "captcha_invalid",
+            "login_page_timeout",
+        } and not is_fatal_failure:
             schedule_failure_retry(task_data, final_error_type, warp_index)
+            return
+
+        if final_error_type == "page_timeout" and not is_fatal_failure:
+            schedule_failure_retry(task_data, "page_timeout", warp_index)
             return
 
         if return_code != 0 and not final_error_type:
             final_error_type = "unknown"
+
+        # 全部失败（无成功游戏）：Mechanism C 非确定性，值得低频补跑一次。
+        # 此前这类账号 final_error_type=checkout_failed，但下面的调度集合
+        # 不含它，于是直接落 manual_required，游戏永久丢失。这里补上覆盖。
+        # schedule_failure_retry 对 checkout_failed 的策略是 (1, 1800)，最多一次，
+        # 不会无限重试放大 WARP 负载。
+        if not successful_games and failed_games and not is_fatal_failure:
+            retry_task = dict(task_data)
+            retry_task["retry_data"] = dict(task_data.get("retry_data", {}))
+            retry_task["retry_data"]["target_games"] = failed_games
+            if schedule_failure_retry(retry_task, "checkout_failed", warp_index):
+                return
 
         if successful_games:
             if failed_games or report_failures or (
@@ -1583,14 +1671,14 @@ def run_task(task_data):
                     retry_task["retry_data"] = dict(task_data["retry_data"])
                     retry_task["retry_data"]["partial"] = partial_retry_count + 1
                     retry_task["retry_data"]["target_games"] = failed_games
-                    if schedule_failure_retry(retry_task, "captcha_failed"):
+                    if schedule_failure_retry(retry_task, "checkout_failed"):
                         set_task_feedback(
                             retry_task,
                             status="⚠️ 部分游戏领取失败，已安排自动补跑",
                             result="retry_scheduled",
                             hint=f"已成功记录本轮已领取游戏，失败游戏稍后自动补跑: {failure_detail}",
                             state="deferred",
-                            error_type="captcha_failed",
+                            error_type="checkout_failed",
                         )
                         return
                 set_task_feedback(
@@ -1733,7 +1821,15 @@ def run_task(task_data):
             terminate_process_group(process)
         cleanup_residual_browser_processes()
         reap_child_processes()
-        log_worker_runtime_health(f"after_task:{ref}")
+        runtime_metrics = log_worker_runtime_health(f"after_task:{ref}")
+        duration = time.monotonic() - started_at
+        print(
+            "worker_metric "
+            f"browser_task_duration_seconds={duration:.3f} "
+            f"browser_process_count={runtime_metrics['process_count']} "
+            f"page_goto_timeout_total={WORKER_METRICS['page_goto_timeout_total']} "
+            f"unhandled_asyncio_future_total={WORKER_METRICS['unhandled_asyncio_future_total']}"
+        )
 
 def main_loop():
     log_worker_boot_info()
@@ -1745,7 +1841,16 @@ def main_loop():
             reap_child_processes()
         move_due_scheduled_tasks()
         move_due_retry_tasks()
-        task = r.blpop("task_queue", timeout=10)
+        try:
+            task = r.blpop("task_queue", timeout=10)
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as exc:
+            # Redis 短暂不可读时保活 worker，不让 supervisor 反复重启浏览器容器。
+            # 关闭连接池后下一轮会自动建立新连接；不丢队列数据。
+            print(f"Redis queue poll transient failure: {type(exc).__name__}")
+            with suppress(Exception):
+                r.close()
+            time.sleep(1)
+            continue
         if task:
             _, data_json = task
             task_data = None

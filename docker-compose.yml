@@ -79,6 +79,7 @@ services:
     secrets:
       - internal_api_token
       - epic_credential_keys
+      - captcha_gemini_api_key
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
       interval: 30s
@@ -137,26 +138,33 @@ services:
     init: true
     cpus: "2.00"
     pids_limit: 300
+    shm_size: "512m"
     volumes:
       - ./data:/app/data
       - ./data:/app/app/volumes
     environment:
       - REDIS_HOST=redis
+      - REDIS_SOCKET_TIMEOUT_SECONDS=20
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
       - ENABLE_APSCHEDULER=false
       - API_PROVIDER=${API_PROVIDER:-siliconflow}
       - API_BASE_URL=${API_BASE_URL:-https://api.siliconflow.cn/v1}
-      - API_KEY_FILE=${API_KEY_FILE:-/run/secrets/captcha_siliconflow_api_key}
+      - API_KEY_FILE=${API_KEY_FILE:-/run/secrets/captcha_gemini_api_key}
       - OPENCODE_BASE_URL=https://opencode.ai/zen
       - INTERNAL_API_TOKEN_FILE=/run/secrets/internal_api_token
       - EPIC_CREDENTIAL_KEYS_FILE=/run/secrets/epic_credential_keys
       - CAPTCHA_NVIDIA_API_KEY_FILE=/run/secrets/captcha_nvidia_api_key
       - CAPTCHA_SILICONFLOW_API_KEY_FILE=/run/secrets/captcha_siliconflow_api_key
+      - CAPTCHA_GEMINI_API_KEY_FILE=/run/secrets/captcha_gemini_api_key
+      - CAPTCHA_PRIMARY_API_KEY_FILE=${CAPTCHA_PRIMARY_API_KEY_FILE:-/run/secrets/captcha_gemini_api_key}
       - TASK_TIMEOUT_SECONDS=600
       - TASK_SOFT_TIMEOUT_SECONDS=480
       - TASK_MIN_GAME_BUDGET_SECONDS=180
       - TASK_LOCK_SECONDS=9000
+      - BROWSER_TASK_CONCURRENCY=1
+      - ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS=60
+      - PAGE_TIMEOUT_RETRY_DELAY_SECONDS=600
       - HCAPTCHA_EXECUTION_TIMEOUT=${HCAPTCHA_EXECUTION_TIMEOUT:-180}
       - HCAPTCHA_RESPONSE_TIMEOUT=${HCAPTCHA_RESPONSE_TIMEOUT:-90}
       - HCAPTCHA_PAYLOAD_TIMEOUT=${HCAPTCHA_PAYLOAD_TIMEOUT:-90}
@@ -196,7 +204,7 @@ services:
       - CAPTCHA_PROVIDER_SITE_KEY=${CAPTCHA_PROVIDER_SITE_KEY:-91e4137f-95af-4bc9-97af-cdcedce21c8c}
       - CAPTCHA_PROVIDER_TIMEOUT=${CAPTCHA_PROVIDER_TIMEOUT:-180}
       - CAPTCHA_PROVIDER_POLL_INTERVAL=${CAPTCHA_PROVIDER_POLL_INTERVAL:-5}
-      - PRIMARY_MODEL=deepseek-ai/DeepSeek-V4-Flash
+      - PRIMARY_MODEL=${PRIMARY_MODEL:-gemini-3.5-flash-lite}
       - PRIMARY_MODEL_FALLBACK=deepseek-ai/DeepSeek-V4-Pro
       # 验证码失败后的自动恢复策略
       - COOKIE_INVALID_MAX_RETRIES=${COOKIE_INVALID_MAX_RETRIES:-1}
@@ -204,7 +212,7 @@ services:
       - WARP_CONTROL_RESTART_RETRIES=${WARP_CONTROL_RESTART_RETRIES:-3}
       - WARP_CONTROL_RESTART_BACKOFF_SECONDS=${WARP_CONTROL_RESTART_BACKOFF_SECONDS:-5}
       - WARP_CONTAINER_FALLBACK_RESTARTS=0
-      - TASK_SPACING_SECONDS=5
+      - TASK_SPACING_SECONDS=10
       # 让浏览器指纹按 WARP 出口 IP 对齐时区/语言/经纬度。改的是指纹，
       # 而账号用的是带既有登录态的持久化 profile，建议在一轮周免跑完
       # 确认基线之后再置为 1；出问题改回 0 重启即可，无需重建镜像。
@@ -220,6 +228,7 @@ services:
       - epic_credential_keys
       - captcha_nvidia_api_key
       - captcha_siliconflow_api_key
+      - captcha_gemini_api_key
     healthcheck:
       test: ["CMD", "python", "-c", "import os,time,redis; r=redis.Redis(host=os.getenv('REDIS_HOST','redis')); v=r.get('worker:heartbeat'); raise SystemExit(0 if v and time.time()-float(v)<90 else 1)"]
       interval: 30s
@@ -242,12 +251,15 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=512m
+      - /app/app/volumes:size=64m
       - /usr/local/lib/python3.12/site-packages/hcaptcha_challenger/logs:size=64m
     environment:
       - DATA_DIR=/tmp/epic-kiosk-test
       - ENABLE_APSCHEDULER=false
       - INTERNAL_API_TOKEN=test-internal-token
-      - EPIC_CREDENTIAL_KEYS=9QKUvZF-uPSzD4suKpprhwUTUyoj5nrR9BgeJeAs5mM=
+      - EPIC_CREDENTIAL_KEYS_FILE=/run/secrets/epic_credential_keys
+    secrets:
+      - epic_credential_keys
 
 secrets:
   internal_api_token:
@@ -255,6 +267,8 @@ secrets:
   epic_credential_keys:
     file: ${EPIC_CREDENTIAL_KEYS_PATH:?set EPIC_CREDENTIAL_KEYS_PATH}
   captcha_nvidia_api_key:
-    file: ${CAPTCHA_NVIDIA_API_KEY_PATH:?set CAPTCHA_NVIDIA_API_KEY_PATH}
+    file: ${CAPTCHA_NVIDIA_API_KEY_PATH:-/dev/null}
   captcha_siliconflow_api_key:
-    file: ${CAPTCHA_SILICONFLOW_API_KEY_PATH:?set CAPTCHA_SILICONFLOW_API_KEY_PATH}
+    file: ${CAPTCHA_SILICONFLOW_API_KEY_PATH:-/dev/null}
+  captcha_gemini_api_key:
+    file: ${CAPTCHA_GEMINI_API_KEY_PATH:-/dev/null}

@@ -9,7 +9,7 @@ import json
 import os
 import re
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from enum import Enum
 from json import JSONDecodeError
 from typing import Any, List
@@ -74,9 +74,128 @@ class GameCollectResult(Enum):
     # 失败：Playwright/Camoufox 驱动断连，可延迟重试
     DRIVER_CRASH = "driver_crash"
 
+    # 失败：页面导航超时，避免在同一任务内立即重复打开浏览器
+    PAGE_TIMEOUT = "page_timeout"
+
+
+class PageNavigationTimeout(RuntimeError):
+    """Page.goto 超时；由 worker 统一安排低频延迟重试。"""
+
+
+class CheckoutInitializationPending(RuntimeError):
+    """Epic 已接受 CTA，但购买 surface 长时间仍在初始化。"""
+
 
 class OrderHistoryUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: str = "invalid"):
+        super().__init__(message)
+        self.status = status
+
+
+ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS = max(
+    0, int(os.getenv("ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS", "60"))
+)
+EPIC_RUNTIME_METRICS: dict[str, int] = {
+    "order_history_status_total": 0,
+    "click_fallback_total": 0,
+    "page_goto_timeout_total": 0,
+    "checkout_surface_pending_total": 0,
+}
+
+
+def _metric_inc(name: str) -> None:
+    EPIC_RUNTIME_METRICS[name] = EPIC_RUNTIME_METRICS.get(name, 0) + 1
+
+
+class OrderHistoryState:
+    """同一浏览器任务共享的订单历史状态，避免确认阶段反复导航/请求。"""
+
+    def __init__(self):
+        self.orders: List[OrderItem] = []
+        self.status = "unknown"
+        self.checks = 0
+        self.last_failure_at = 0.0
+        self._logged_status: str | None = None
+
+    async def sync(self, page: Page, *, force: bool = False) -> None:
+        if self.status in {"forbidden", "transient", "invalid"}:
+            # 失败状态在本任务内只保留一次；不发起后台探测，避免订单历史 401/403
+            # 触发重复页面导航。下一个真实任务会重新创建 state 并验证。
+            if (
+                ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS > 0
+                and time.monotonic() - self.last_failure_at
+                < ORDER_HISTORY_FAILURE_COOLDOWN_SECONDS
+            ):
+                return
+            return
+        if self.status == "available" and not force:
+            return
+        # 允许一次初始检查和一次最终复核，超过后只使用缓存结果。
+        if self.checks >= 2:
+            return
+
+        self.checks += 1
+        try:
+            self.orders = await _fetch_order_items(page)
+            self.status = "available"
+            _metric_inc("order_history_status_total")
+            _metric_inc("order_history_status_total_available")
+            return
+        except OrderHistoryUnavailable as err:
+            self.orders = []
+            self.status = err.status
+            _metric_inc("order_history_status_total")
+            _metric_inc(f"order_history_status_total_{self.status}")
+            self.last_failure_at = time.monotonic()
+            if self._logged_status != self.status:
+                logger.warning(
+                    f"order_history_unavailable status={self.status} "
+                    f"detail={str(err)[:120]}"
+                )
+                self._logged_status = self.status
+        except Exception as err:
+            self.orders = []
+            self.status = "transient"
+            _metric_inc("order_history_status_total")
+            _metric_inc("order_history_status_total_transient")
+            self.last_failure_at = time.monotonic()
+            if self._logged_status != self.status:
+                logger.warning(
+                    f"order_history_unavailable status=transient "
+                    f"type={type(err).__name__}"
+                )
+                self._logged_status = self.status
+
+
+async def _await_with_cleanup(awaitable: Any, timeout: float):
+    """超时后显式取消并回收底层 Future，避免未处理 Future 异常。"""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.wait_for(task, timeout=timeout)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        with suppress(BaseException):
+            await task
+        raise
+
+
+async def _goto_or_raise(
+    page: Page,
+    url: str,
+    *,
+    wait_until: str = "domcontentloaded",
+    timeout: int = 30000,
+):
+    try:
+        return await page.goto(url, wait_until=wait_until, timeout=timeout)
+    except TimeoutError as err:
+        # 只保留 host，避免把可能带有会话参数的完整 URL 写入日志。
+        host = re.split(r"/", url.removeprefix("https://").removeprefix("http://"), 1)[0]
+        _metric_inc("page_goto_timeout_total")
+        raise PageNavigationTimeout(
+            f"Page.goto: Timeout {timeout}ms exceeded host={host}"
+        ) from err
 
 
 def _promotion_count(data: dict) -> int:
@@ -174,19 +293,24 @@ async def _fetch_order_items(page: Page) -> List[OrderItem]:
     content_type = response.headers.get("content-type", "").lower()
     final_url = response.url
     if status in {401, 403}:
-        raise OrderHistoryUnavailable(f"session_invalid status={status}")
+        raise OrderHistoryUnavailable(
+            f"order_history_forbidden status={status}", status="forbidden"
+        )
     if status == 429 or status >= 500:
-        raise OrderHistoryUnavailable(f"transient status={status}")
+        raise OrderHistoryUnavailable(f"transient status={status}", status="transient")
     if status >= 400:
-        raise OrderHistoryUnavailable(f"rejected status={status}")
+        raise OrderHistoryUnavailable(f"rejected status={status}", status="invalid")
     if "json" not in content_type:
         raise OrderHistoryUnavailable(
-            f"unexpected_content_type status={status} url_host={final_url.split('/')[2]}"
+            f"unexpected_content_type status={status} url_host={final_url.split('/')[2]}",
+            status="invalid",
         )
     try:
         data = await response.json()
     except Exception as exc:
-        raise OrderHistoryUnavailable(f"invalid_json status={status}") from exc
+        raise OrderHistoryUnavailable(
+            f"invalid_json status={status}", status="invalid"
+        ) from exc
 
     completed_orders: List[OrderItem] = []
     for raw_order in data.get("orders", []):
@@ -272,7 +396,8 @@ def get_promotions() -> List[PromotionGame]:
 class EpicAgent:
     def __init__(self, page: Page):
         self.page = page
-        self.epic_games = EpicGames(self.page)
+        self._order_history = OrderHistoryState()
+        self.epic_games = EpicGames(self.page, order_history=self._order_history)
         self._promotions: List[PromotionGame] = []
         self._ctx_cookies_is_available: bool = False
         self._orders: List[OrderItem] = []
@@ -364,14 +489,14 @@ class EpicAgent:
             return False
 
     async def _sync_order_history(self, force: bool = False):
-        if self._orders and not force:
+        if self._orders and not force and self._order_history.status == "unknown":
+            # 兼容调用方预加载的订单缓存，也避免无必要的网络请求。
+            self._order_history.orders = list(self._orders)
+            self._order_history.status = "available"
+            self._order_history.checks = max(1, self._order_history.checks)
             return
-        try:
-            completed_orders = await _fetch_order_items(self.page)
-        except Exception as err:
-            logger.warning(err)
-            completed_orders = []
-        self._orders = completed_orders
+        await self._order_history.sync(self.page, force=force)
+        self._orders = list(self._order_history.orders)
 
     async def _check_orders(self, force: bool = False):
         await self._sync_order_history(force=force)
@@ -418,7 +543,7 @@ class EpicAgent:
                 - (False, UNKNOWN_ERROR): 未知错误
         """
         self._ctx_cookies_is_available = False
-        await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
+        await _goto_or_raise(self.page, URL_CLAIM, timeout=30000)
 
         # ============================================================
         # 🔥 关键修复：等待页面稳定，防止 JS 重定向导致检测遗漏
@@ -439,7 +564,7 @@ class EpicAgent:
                 logger.warning(f"⚠️ 检测到修正页面（尝试 {attempt + 1}/{max_eula_attempts}）")
                 if await self._handle_eula_correction():
                     # EULA 处理成功后，重新导航到目标页面
-                    await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
+                    await _goto_or_raise(self.page, URL_CLAIM, timeout=30000)
                     await self.page.wait_for_timeout(2000)  # 再次等待稳定
                 else:
                     logger.error("❌ EULA 处理失败，跳过此账号")
@@ -484,7 +609,13 @@ class EpicAgent:
         Returns:
             GameCollectResult: 执行结果
         """
-        should_ignore, result = await self._should_ignore_task()
+        try:
+            should_ignore, result = await self._should_ignore_task()
+        except PageNavigationTimeout:
+            # 登录页/领取页导航超时也必须进入受控 page_timeout 重试，不能
+            # 让 worker 的兜底分支把它误分类为 unknown_error。
+            logger.warning("page_goto_timeout host=store.epicgames.com stage=claim")
+            return GameCollectResult.PAGE_TIMEOUT
 
         # 所有游戏已在库中
         if should_ignore:
@@ -518,6 +649,8 @@ class EpicAgent:
             except Exception as e:
                 logger.exception(e)
                 error_message = str(e).lower()
+                if isinstance(e, PageNavigationTimeout):
+                    return GameCollectResult.PAGE_TIMEOUT
                 if _is_driver_disconnect_error(e):
                     return GameCollectResult.DRIVER_CRASH
                 if "provider_timeout" in error_message:
@@ -535,10 +668,12 @@ class EpicAgent:
 
 
 class EpicGames:
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, order_history: OrderHistoryState | None = None):
         self.page = page
         self._promotions: List[PromotionGame] = []
-        self._orders: List[OrderItem] = []
+        self._order_history = order_history or OrderHistoryState()
+        self._orders: List[OrderItem] = self._order_history.orders
+        self._product_ownership_checks = 0
 
     @staticmethod
     async def _agree_license(page: Page):
@@ -737,6 +872,66 @@ class EpicGames:
             return False
 
     @staticmethod
+    @asynccontextmanager
+    async def _network_probe(page: Page, label: str):
+        """Temporarily attach request/response listeners around a CTA click.
+
+        Mechanism C 的失败发生在「点击商品页 CTA → Epic 创建结账 iframe」这一段，
+        此前这里没有任何网络层观测，点击后是黑盒：日志只能看到「点击已派发」，
+        无法区分「Epic 受理了」与「点击被吞了」。这段 probe 记录点击前后的
+        Epic HEAD/POST/GET（尤其是 /cart、/purchase、webPurchaseContainer 相关），
+        用于把 Mechanism C 的真因从黑盒里捞出来。
+
+        探针只在上下文内临时挂载，退出时必卸，避免监听器跨游戏累积、重复处理
+        已 detach 的 hCaptcha frame。所有异常都被吞掉，绝不干扰主流程。
+        """
+        seen: dict[str, int] = {}
+
+        def _norm(url: str) -> str:
+            try:
+                from urllib.parse import urlparse
+
+                p = urlparse(url)
+                return (p.netloc or "") + (p.path or "")
+            except Exception:
+                return url or ""
+
+        def _on_request(req):
+            try:
+                u = req.url or ""
+                if "epicgames.com" in u or "egs" in u or "purchase" in u or "cart" in u:
+                    seen[f"REQ {req.method} {_norm(u)}"] = seen.get(f"REQ {req.method} {_norm(u)}", 0) + 1
+            except Exception:
+                pass
+
+        def _on_response(resp):
+            try:
+                u = resp.url or ""
+                if "epicgames.com" in u or "egs" in u or "purchase" in u or "cart" in u:
+                    key = f"RES {resp.status} {_norm(u)}"
+                    seen[key] = seen.get(key, 0) + 1
+            except Exception:
+                pass
+
+        has_probe = hasattr(page, "on") and callable(getattr(page, "on", None))
+        try:
+            if has_probe:
+                page.on("request", _on_request)
+                page.on("response", _on_response)
+            yield
+        finally:
+            if has_probe:
+                with suppress(Exception):
+                    page.remove_listener("request", _on_request)
+                with suppress(Exception):
+                    page.remove_listener("response", _on_response)
+            if seen:
+                # 去重后逐条输出，便于复盘点击前后到底发了哪些请求、Epic 回的什么。
+                logger.info(f"🔬 网络探针[{label}] 点击前后请求/响应:")
+                for k, n in sorted(seen.items()):
+                    logger.info(f"    {k}" + (f" (×{n})" if n > 1 else ""))
+
+    @staticmethod
     async def _wait_for_checkout_surface(page: Page, timeout_ms: int = 45000) -> str:
         """Wait until Epic exposes a checkout surface or a terminal page state."""
         deadline = time.monotonic() + timeout_ms / 1000
@@ -761,19 +956,24 @@ class EpicGames:
             logger.warning("Disk pressure active; skip checkout debug artifacts")
             return
         safe_reason = re.sub(r"[^a-zA-Z0-9_.-]+", "_", reason).strip("_") or "unknown"
+        # 原先四个产物都用固定名，同一 reason 的每次失败互相覆盖 —— 历史上
+        # 207 次结账界面失败只留下 1 份现场，无法横向比对。给诊断实际会用到的
+        # page.html 与 frames.json 加时间戳；frame_0 内容与 page 完全重复、
+        # png 体积大，保持覆盖以控制磁盘增长。
+        stamped_reason = f"{time.strftime('%Y%m%d-%H%M%S')}_{safe_reason}"
         debug_dir = RUNTIME_DIR.joinpath("checkout_debug")
         with suppress(Exception):
             debug_dir.mkdir(parents=True, exist_ok=True)
 
         async def _bounded(label: str, coro: Any, timeout: float = 5):
             try:
-                return await asyncio.wait_for(coro, timeout=timeout)
+                return await _await_with_cleanup(coro, timeout=timeout)
             except Exception as err:
                 logger.warning(f"🧾 保存结账调试信息失败: {label}: {err}")
                 return None
 
         with suppress(Exception):
-            main_path = debug_dir.joinpath(f"{safe_reason}_page.html")
+            main_path = debug_dir.joinpath(f"{stamped_reason}_page.html")
             main_content = await _bounded("page.content", page.content())
             if main_content:
                 main_path.write_text(main_content, encoding="utf-8")
@@ -792,7 +992,7 @@ class EpicGames:
                     frame_path.write_text(frame_content, encoding="utf-8")
 
         with suppress(Exception):
-            frames_path = debug_dir.joinpath(f"{safe_reason}_frames.json")
+            frames_path = debug_dir.joinpath(f"{stamped_reason}_frames.json")
             frames_path.write_text(json.dumps(frame_rows, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.warning(f"🧾 已保存结账 frame 列表: {frames_path}")
 
@@ -834,7 +1034,7 @@ class EpicGames:
                 return False
 
             logger.info("ℹ️ Epic 显示设备不支持提示，点击 Continue 继续领取流程")
-            clicked = await asyncio.wait_for(
+            clicked = await _await_with_cleanup(
                 page.evaluate(
                     """() => {
                         const buttons = Array.from(document.querySelectorAll('button'));
@@ -867,20 +1067,15 @@ class EpicGames:
                 await accept.click()
                 return True
 
-    async def _sync_order_history(self) -> None:
-        try:
-            completed_orders = await _fetch_order_items(self.page)
-        except Exception as err:
-            logger.warning(
-                f"order_history_unavailable type={type(err).__name__} detail={str(err)[:160]}"
-            )
-            completed_orders = []
-        self._orders = completed_orders
+    async def _sync_order_history(self, force: bool = False) -> None:
+        await self._order_history.sync(self.page, force=force)
+        self._orders = list(self._order_history.orders)
 
     async def _order_history_contains(self, namespace: str | None) -> bool:
         if not namespace:
             return False
-        await self._sync_order_history()
+        # 只有最终复核才允许进行第二次真实请求；失败状态不会后台探测。
+        await self._sync_order_history(force=True)
         return any(order.namespace == namespace for order in self._orders)
 
     @staticmethod
@@ -892,33 +1087,42 @@ class EpicGames:
     async def _product_is_owned(page: Page, product_url: str) -> bool:
         """Verify ownership on the product page after checkout closes."""
         try:
-            await page.goto(product_url, wait_until="domcontentloaded", timeout=30000)
+            await _goto_or_raise(page, product_url, timeout=30000)
             await asyncio.sleep(2)
             purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
             if await purchase_btn.is_visible(timeout=3000):
                 text = (await purchase_btn.text_content(timeout=1000) or "").strip().upper()
-                return await purchase_btn.is_disabled(timeout=1000) or text in {
-                    "IN LIBRARY",
-                    "OWNED",
-                }
+                disabled = await purchase_btn.is_disabled(timeout=1000)
+                owned_by_text = text in {"IN LIBRARY", "OWNED"}
+                # 只认显式的已拥有文本。原先是 `disabled or owned_by_text`，会把任何
+                # 禁用按钮判为已拥有 —— 2026-08-27 观测抓到两例：按钮读
+                # 'REQUIRES BASE GAME'（未拥有、缺本体）却因 disabled=True 被记成
+                # claimed，report_success 随即把"已领取"写进 logs 表，用户被告知
+                # 拿到了没拿到的游戏。8 个样本中仅文本判定全部正确，无一例外。
+                # 08-07 之前的原始实现 _current_product_is_owned 正是只按文本判定。
+                # 仍记录 disabled，便于观察 hydration 竞态等情况。
+                logger.info(
+                    f"归属检查: text='{text}' disabled={disabled} 判定={owned_by_text}"
+                )
+                return owned_by_text
+        except PageNavigationTimeout:
+            raise
         except Exception as err:
             logger.warning(f"⚠️ 无法验证商品入库状态: {err}")
         return False
 
     @staticmethod
     async def _click_product_cta(button: Any) -> None:
-        """Click Epic product CTA with fallbacks for sticky overlays/animations."""
+        """点击商品 CTA；普通点击失败时只允许一次 force fallback。"""
         try:
-            await asyncio.wait_for(
-                button.click(timeout=5000, no_wait_after=True), timeout=6
-            )
+            await _await_with_cleanup(button.click(timeout=5000, no_wait_after=True), timeout=6)
             logger.debug("商品按钮常规点击完成")
             return
         except Exception as first_error:
             logger.warning(f"⚠️ 商品按钮常规点击失败，尝试 force 点击: {first_error}")
 
         try:
-            await asyncio.wait_for(
+            await _await_with_cleanup(
                 button.click(force=True, timeout=5000, no_wait_after=True), timeout=6
             )
             logger.debug("商品按钮 force 点击完成")
@@ -931,7 +1135,7 @@ class EpicGames:
         selector = "button[data-testid='purchase-cta-button']"
         button = page.locator(selector).first
 
-        async def _confirm_surface(label: str, timeout_ms: int = 60000) -> bool:
+        async def _confirm_surface(label: str, timeout_ms: int = 30000) -> bool:
             if not expect_checkout:
                 return True
             try:
@@ -943,162 +1147,108 @@ class EpicGames:
                 return False
 
         async def _checkout_is_pending() -> bool:
-            with suppress(Exception):
+            # Epic 接受点击后会把 Get 按钮置灰并显示 progressbar。此时再次
+            # 点击只会制造竞态，因此只等待一次受控窗口，不再重复派发点击。
+            try:
                 progress = button.locator("[role='progressbar']")
                 return await button.is_disabled(timeout=1000) and await progress.count() > 0
-            return False
+            except Exception:
+                return False
 
         try:
             await button.wait_for(state="visible", timeout=5000)
-            clicked_text = await asyncio.wait_for(
-                button.evaluate(
-                    "button => { const text = button.textContent || ''; "
-                    "setTimeout(() => button.click(), 5000); return text; }"
-                ),
-                timeout=6,
-            )
-            logger.info(f"商品页 CTA 原生点击完成: {clicked_text.strip()!r}")
+            async with EpicGames._network_probe(page, "product_page_cta"):
+                await _await_with_cleanup(
+                    button.click(timeout=10000, no_wait_after=True), timeout=11
+                )
+            # clicked_text 仅用于日志。此前它排在点击之前，按钮 hydration 慢导致
+            # text_content 超时就会让整个点击段被 abort —— 点击根本没派发，结账
+            # surface 自然不开（Mechanism C 的确定性子集）。改为点击后用 suppress 读取，
+            # 慢读绝不再中止点击。
+            with suppress(Exception):
+                clicked_text = (await button.text_content(timeout=2000) or "").strip()
+            logger.info(f"商品页 CTA 常规点击完成: {clicked_text!r}")
             await page.wait_for_timeout(1500)
-            if await _confirm_surface("原生点击"):
+            if await _confirm_surface("常规点击", timeout_ms=30000):
                 return
             if await _checkout_is_pending():
-                raise RuntimeError("Epic checkout initialization remained pending after native click")
-        except Exception as native_error:
-            logger.warning(f"⚠️ 商品页 CTA 原生点击失败: {native_error}")
-
-        try:
-            await button.wait_for(state="visible", timeout=5000)
-            # Epic opens checkout asynchronously inside an iframe. Waiting for
-            # navigation here can hang even though the click was already sent.
-            await asyncio.wait_for(
-                button.click(timeout=10000, no_wait_after=True), timeout=11
-            )
-            logger.info("商品页 CTA 常规点击完成")
-            await page.wait_for_timeout(1500)
-            if await _confirm_surface("常规点击"):
-                return
-            if await _checkout_is_pending():
-                raise RuntimeError("Epic checkout initialization remained pending after click")
+                _metric_inc("checkout_surface_pending_total")
+                logger.warning("⚠️ 商品页 CTA 已进入 pending 状态，跳过重复 fallback")
+                raise CheckoutInitializationPending("Epic checkout initialization remained pending")
+        except CheckoutInitializationPending:
+            raise
         except Exception as click_error:
             logger.warning(f"⚠️ 商品页 CTA 常规点击失败: {click_error}")
 
         try:
-            await asyncio.wait_for(
-                button.evaluate("button => button.focus()"),
-                timeout=3,
-            )
-            await asyncio.wait_for(page.keyboard.press("Enter"), timeout=5)
-            logger.info("商品页 CTA 键盘 Enter 激活完成")
-            await page.wait_for_timeout(1500)
-            if await _confirm_surface("键盘 Enter"):
-                return
-            if await _checkout_is_pending():
-                raise RuntimeError("Epic checkout initialization remained pending after Enter")
-        except Exception as keyboard_error:
-            logger.warning(f"⚠️ 商品页 CTA 键盘 Enter 激活失败: {keyboard_error}")
-
-        try:
-            await asyncio.wait_for(
-                button.click(force=True, timeout=5000, no_wait_after=True), timeout=6
-            )
-            logger.info("商品页 CTA force 点击完成")
-            await page.wait_for_timeout(2000)
-            if await _confirm_surface("force 点击"):
-                return
-        except Exception as force_error:
-            logger.warning(f"⚠️ 商品页 CTA force 点击失败: {force_error}")
-
-        try:
-            result = await asyncio.wait_for(
+            # 单一受控 fallback：同步派发一组完整指针事件，不创建延迟
+            # timer，也不再组合键盘/force/多次点击。
+            # camoufox 中 `view: window` 导致 `MouseEvent 'view' member does not implement
+            # interface Window`。去掉 view（默认即为 window），并把 textContent 读取
+            # 放到点击后、用 suppress 保护，避免 hydration 慢导致 fallback 也被 abort。
+            result = await _await_with_cleanup(
                 page.evaluate(
                     """(selector) => {
                         const button = document.querySelector(selector);
-                        if (!button) return {clicked: false, reason: 'missing'};
+                        if (!button || button.disabled) return {clicked: false, reason: 'missing_or_disabled'};
                         button.scrollIntoView({block: 'center', inline: 'center'});
                         const rect = button.getBoundingClientRect();
-                        const x = rect.left + rect.width / 2;
-                        const y = rect.top + rect.height / 2;
+                        const init = {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: rect.left + rect.width / 2,
+                            clientY: rect.top + rect.height / 2,
+                        };
                         for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-                            button.dispatchEvent(new MouseEvent(type, {
-                                bubbles: true,
-                                cancelable: true,
-                                view: window,
-                                clientX: x,
-                                clientY: y,
-                            }));
+                            button.dispatchEvent(new MouseEvent(type, init));
                         }
                         button.click();
-                        return {clicked: true, text: button.textContent || ''};
+                        return {clicked: true};
                     }""",
                     selector,
                 ),
                 timeout=6,
             )
-            if result and result.get("clicked"):
-                logger.info(f"商品页 CTA JS click 完成: {result.get('text', '').strip()!r}")
-                await page.wait_for_timeout(2000)
-                if await _confirm_surface("JS click"):
-                    return
-            logger.warning(f"⚠️ 商品页 CTA JS click 未命中: {result}")
-        except Exception as js_error:
-            logger.warning(f"⚠️ 商品页 CTA JS click 失败: {js_error}")
+            if not result or not result.get("clicked"):
+                raise RuntimeError(f"fallback click 未命中: {result}")
+            _metric_inc("click_fallback_total")
+            logger.info(f"商品页 CTA fallback click 完成: {result.get('text', '').strip()!r}")
+            await page.wait_for_timeout(2000)
+            if await _confirm_surface("fallback click", timeout_ms=30000):
+                return
+        except Exception as fallback_error:
+            logger.warning(f"⚠️ 商品页 CTA fallback click 失败: {fallback_error}")
 
         raise RuntimeError("product page cta click did not open checkout surface")
 
     @staticmethod
     async def _click_checkout_cta(container: Any, button: Any) -> None:
-        """Click checkout CTA as a real browser action, with JS only as fallback."""
+        """结账 CTA 只执行一次普通点击，失败时执行一次同步 JS fallback。"""
         try:
-            clicked = await asyncio.wait_for(
-                button.evaluate(
-                    "button => { setTimeout(() => button.click(), 5000); return true; }"
-                ),
-                timeout=6,
-            )
-            if clicked:
-                logger.info("结账 CTA 原生点击完成")
-                return
-        except Exception as native_error:
-            logger.warning(f"⚠️ 结账 CTA 原生点击失败，尝试 Playwright 点击: {native_error}")
-
-        try:
-            await asyncio.wait_for(
+            await _await_with_cleanup(
                 button.click(timeout=10000, no_wait_after=True), timeout=11
             )
             logger.info("结账 CTA 常规点击完成")
             return
         except Exception as click_error:
-            logger.warning(f"⚠️ 结账 CTA 常规点击失败，尝试 JS click: {click_error}")
+            logger.warning(f"⚠️ 结账 CTA 常规点击失败，尝试 fallback click: {click_error}")
 
         try:
-            clicked = await asyncio.wait_for(
+            clicked = await _await_with_cleanup(
                 button.evaluate(
                     """(button) => {
-                        const targets = new Set([
-                            'add to library',
-                            'place order',
-                            'get',
-                            'confirm',
-                            'confirm order',
-                            'complete order',
-                            'submit order',
-                            'buy now',
-                        ]);
-                        const text = (button.textContent || '').trim().toLowerCase().replace(/\\s+/g, ' ');
-                        const aria = (button.getAttribute('aria-label') || '').trim().toLowerCase().replace(/\\s+/g, ' ');
-                        if (button.disabled || (!targets.has(text) && !targets.has(aria))) return false;
+                        if (button.disabled) return false;
                         button.scrollIntoView({block: 'center', inline: 'center'});
                         const rect = button.getBoundingClientRect();
-                        const x = rect.left + rect.width / 2;
-                        const y = rect.top + rect.height / 2;
+                        const init = {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window,
+                            clientX: rect.left + rect.width / 2,
+                            clientY: rect.top + rect.height / 2,
+                        };
                         for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-                            button.dispatchEvent(new MouseEvent(type, {
-                                bubbles: true,
-                                cancelable: true,
-                                view: window,
-                                clientX: x,
-                                clientY: y,
-                            }));
+                            button.dispatchEvent(new MouseEvent(type, init));
                         }
                         button.click();
                         return true;
@@ -1107,14 +1257,14 @@ class EpicGames:
                 timeout=6,
             )
             if clicked:
-                logger.info("结账 CTA JS click 完成")
+                _metric_inc("click_fallback_total")
+                logger.info("结账 CTA fallback click 完成")
                 return
-        except Exception as js_error:
-            logger.warning(f"⚠️ 结账 CTA JS click 失败，尝试 force click: {js_error}")
-
-            await asyncio.wait_for(
-                button.click(force=True, timeout=5000, no_wait_after=True), timeout=6
-            )
+            raise RuntimeError("fallback click 未命中")
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"checkout cta fallback click failed: {fallback_error}"
+            ) from fallback_error
 
     @staticmethod
     async def _has_visible_hcaptcha_challenge(page: Page, timeout_ms: int = 10000) -> bool:
@@ -1127,7 +1277,7 @@ class EpicGames:
                     continue
                 with suppress(Exception):
                     challenge = frame.locator("div.challenge-view").first
-                    if await asyncio.wait_for(
+                    if await _await_with_cleanup(
                         challenge.is_visible(timeout=1500), timeout=2
                     ):
                         return True
@@ -1149,9 +1299,11 @@ class EpicGames:
             logger.success("🎉 领取成功：订单历史已确认入库")
             return True
 
-        if check_order_history and await self._product_is_owned(page, product_url):
-            logger.success("🎉 领取成功：商品页已确认入库")
-            return True
+        if check_order_history and self._product_ownership_checks < 2:
+            self._product_ownership_checks += 1
+            if await self._product_is_owned(page, product_url):
+                logger.success("🎉 领取成功：商品页已确认入库")
+                return True
 
         return False
 
@@ -1217,6 +1369,20 @@ class EpicGames:
             logger.debug(f"点击支付按钮: {await payment_btn.text_content()}")
             await self._click_checkout_cta(wpc, payment_btn)
             await asyncio.sleep(2)
+            # _click_checkout_cta 用 no_wait_after=True，"常规点击完成"只表示事件已派发，
+            # 不代表 Epic 受理了订单。实测成功与失败运行在点击段的日志逐字相同，
+            # 无法区分"点击生效"与"点击被吞"。这里记录点击后 2s 的按钮与页面状态；
+            # 抛异常（元素已脱离）本身也是有效信号，说明 iframe 确实发生了变更。
+            try:
+                post_text = (await payment_btn.text_content(timeout=1000) or "").strip()
+                post_disabled = await payment_btn.is_disabled(timeout=1000)
+                logger.info(
+                    f"支付点击后: text='{post_text}' disabled={post_disabled} url={page.url}"
+                )
+            except Exception as probe_err:
+                logger.info(
+                    f"支付点击后: 按钮已脱离 ({type(probe_err).__name__}) url={page.url}"
+                )
 
             # 大多数免费订单在点击后可直接完成，先用后台请求确认，避免无条件进入验证码库。
             if await self._wait_for_checkout_confirmation(
@@ -1280,6 +1446,8 @@ class EpicGames:
                 return True
 
         except Exception as err:
+            if isinstance(err, PageNavigationTimeout):
+                raise
             if _is_captcha_error(err):
                 raise RuntimeError(f"captcha checkout verification failed: {err}") from err
             if _is_driver_disconnect_error(err):
@@ -1301,59 +1469,6 @@ class EpicGames:
         has_pending_cart_items = False
         outcomes: dict[str, str] = {}
 
-        # Run the product click inside the page. Epic's click handler can keep
-        # Playwright's locator/evaluate command waiting even after the event was
-        # delivered; an init-script observer avoids coupling those two steps.
-        await page.add_init_script(
-            """
-            (() => {
-                if (window.top !== window) return;
-                let observer;
-                const arm = () => {
-                    const button = document.querySelector(
-                        "button[data-testid='purchase-cta-button']"
-                    );
-                    if (!button || button.disabled || window.__epicKioskClicked) return;
-                    const text = (button.textContent || '').trim().toUpperCase();
-                    if (text !== 'GET' && text !== 'PURCHASE') return;
-                    window.__epicKioskClicked = true;
-                    if (observer) observer.disconnect();
-                    setTimeout(() => button.click(), 750);
-                    let continueAttempts = 0;
-                    const continueTimer = setInterval(() => {
-                        continueAttempts += 1;
-                        const continueButton = Array.from(
-                            document.querySelectorAll("[role='dialog'] button, button")
-                        ).find((item) => {
-                            const label = (item.textContent || '').trim().toUpperCase();
-                            const rect = item.getBoundingClientRect();
-                            return label === 'CONTINUE' && !item.disabled
-                                && rect.width > 0 && rect.height > 0;
-                        });
-                        if (continueButton) {
-                            clearInterval(continueTimer);
-                            continueButton.click();
-                        } else if (continueAttempts >= 60) {
-                            clearInterval(continueTimer);
-                        }
-                    }, 500);
-                };
-                const start = () => {
-                    observer = new MutationObserver(arm);
-                    observer.observe(document.documentElement, {
-                        childList: true,
-                        subtree: true,
-                        attributes: true,
-                        attributeFilter: ['disabled'],
-                    });
-                    arm();
-                };
-                if (document.documentElement) start();
-                else document.addEventListener('DOMContentLoaded', start, {once: true});
-            })();
-            """
-        )
-
         for promotion in promotions:
             soft_deadline = float(os.getenv("TASK_SOFT_DEADLINE_EPOCH", "0") or 0)
             minimum_budget = float(os.getenv("TASK_MIN_GAME_BUDGET_SECONDS", "180"))
@@ -1366,7 +1481,10 @@ class EpicGames:
                 continue
             url = promotion.url
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await _goto_or_raise(page, url, timeout=45000)
+            except PageNavigationTimeout:
+                logger.warning(f"page_goto_timeout host=store.epicgames.com title={promotion.title}")
+                raise
             except Exception as err:
                 if _is_driver_disconnect_error(err):
                     raise RuntimeError(f"driver navigation failed: {err}") from err
@@ -1398,7 +1516,7 @@ class EpicGames:
             # 2. 检查按钮可见性
             try:
                 if not await purchase_btn.is_visible(timeout=5000):
-                    all_text = await asyncio.wait_for(
+                    all_text = await _await_with_cleanup(
                         page.locator("body").text_content(timeout=5000),
                         timeout=6,
                     )
@@ -1418,14 +1536,14 @@ class EpicGames:
                 continue
 
             # 3. 获取按钮信息
-            btn_text = await asyncio.wait_for(
+            btn_text = await _await_with_cleanup(
                 purchase_btn.text_content(timeout=5000),
                 timeout=6,
             )
             if not btn_text: btn_text = ""
             btn_text = btn_text.strip()
             btn_text_upper = btn_text.upper()
-            is_disabled = await asyncio.wait_for(
+            is_disabled = await _await_with_cleanup(
                 purchase_btn.is_disabled(timeout=5000),
                 timeout=6,
             )
@@ -1456,7 +1574,7 @@ class EpicGames:
             # 6. 尝试领取
             # 单个游戏的结账/验证码失败不应中断整轮任务；记录失败后继续处理后续游戏。
             try:
-                # 初始化脚本已经在页面内部点击 Get；这里只等待结账界面。
+                await self._click_product_page_cta(page, expect_checkout=True)
                 surface = await self._wait_for_checkout_surface(page, timeout_ms=60000)
                 logger.info(f"✅ 商品页进入结账状态: {surface}")
 
@@ -1467,8 +1585,25 @@ class EpicGames:
                     promotion.namespace,
                 )
             except Exception as err:
+                if isinstance(err, PageNavigationTimeout):
+                    raise
                 if _is_driver_disconnect_error(err):
                     raise RuntimeError(f"driver checkout failed: {err}") from err
+                # CTA 已经派发但结账 surface 没出现时，最后做一次受控的
+                # durable-state 复核，避免把已入库订单误报为失败；不会再次
+                # 点击，也不会触发新的 WARP/账号切换。
+                try:
+                    if await self._confirm_checkout_success(
+                        page, url, promotion.namespace, check_order_history=True
+                    ):
+                        outcomes[promotion.title] = "claimed"
+                        self._emit_game_result(promotion.title, "claimed")
+                        logger.success("🎉 领取成功：结账 surface 缺失但持久状态已确认")
+                        continue
+                except PageNavigationTimeout:
+                    raise
+                except Exception as verify_error:
+                    logger.debug(f"checkout durable-state recovery skipped: {verify_error}")
                 logger.warning(f"⚠️ 游戏领取失败，继续处理其他周免游戏: {promotion.title} - {err}")
                 status = "deferred" if "provider_timeout" in str(err) else "unconfirmed"
                 outcomes[promotion.title] = status
@@ -1510,7 +1645,7 @@ class EpicGames:
     async def _purchase_free_game(self, max_attempts: int = 2) -> bool:
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
-            await self.page.goto(URL_CART, wait_until="domcontentloaded")
+            await _goto_or_raise(self.page, URL_CART, timeout=30000)
             logger.debug("Move ALL paid games from the shopping cart out")
             await self._empty_cart(self.page)
 

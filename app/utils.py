@@ -119,6 +119,11 @@ CONSOLE_KEYWORDS = [
     "错误",
     "失败",
     "警告",
+    # 网络探针（Mechanism C 观测）：让点击 CTA 前后的 Epic 请求/响应
+    # 透传到控制台（docker logs），便于肉眼复盘黑盒。
+    "网络探针",
+    "REQ ",
+    "RES ",
 ]
 
 # 控制台要过滤掉的详细日志关键词（即使级别匹配也不显示）
@@ -207,48 +212,48 @@ def init_log(**sink_channel):
 
     # 错误日志文件：按日期存储，格式 error-2026-03-22.log
     if sink_channel.get("error"):
-        error_path = Path(sink_channel.get("error"))
-        log_dir = error_path.parent
-        log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            error_path = Path(sink_channel.get("error"))
+            log_dir = error_path.parent
+            log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 日期必须用 loguru 的 {time} 占位符，不能在应用层写死。
-        # 此前是初始化时算好 date_str 拼进文件名，loguru 只认得当天那一族文件，
-        # 于是 retention="30 days" 和 compression="gz" 对历史文件完全不生效 ——
-        # 实测 data/logs 下 201 个文件、75MB、0 个 .gz，自 2026-03-22 起从未清理。
-        error_log_file = log_dir / "error-{time:YYYY-MM-DD}.log"
+            # 日期必须用 loguru 的 {time} 占位符，不能在应用层写死。
+            error_log_file = log_dir / "error-{time:YYYY-MM-DD}.log"
 
-        logger.add(
-            sink=str(error_log_file),
-            level="ERROR",
-            rotation="1 MB",
-            filter=timezone_filter,
-            retention="30 days",
-            compression="gz",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
-            encoding="utf-8",
-        )
+            logger.add(
+                sink=str(error_log_file),
+                level="ERROR",
+                rotation="1 MB",
+                filter=timezone_filter,
+                retention="30 days",
+                compression="gz",
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+                encoding="utf-8",
+            )
+        except (OSError, PermissionError):
+            pass
 
     # 运行时日志文件：按日期存储，格式 runtime-2026-03-22.log
     if sink_channel.get("runtime"):
-        runtime_path = Path(sink_channel.get("runtime"))
-        log_dir = runtime_path.parent
-        log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            runtime_path = Path(sink_channel.get("runtime"))
+            log_dir = runtime_path.parent
+            log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 日期必须用 loguru 的 {time} 占位符，不能在应用层写死。
-        # 此前是初始化时算好 date_str 拼进文件名，loguru 只认得当天那一族文件，
-        # 于是 retention="30 days" 和 compression="gz" 对历史文件完全不生效 ——
-        # 实测 data/logs 下 201 个文件、75MB、0 个 .gz，自 2026-03-22 起从未清理。
-        runtime_log_file = log_dir / "runtime-{time:YYYY-MM-DD}.log"
+            # 日期必须用 loguru 的 {time} 占位符，不能在应用层写死。
+            runtime_log_file = log_dir / "runtime-{time:YYYY-MM-DD}.log"
 
-        logger.add(
-            sink=str(runtime_log_file),
-            level="DEBUG",
-            rotation="1 MB",
-            filter=timezone_filter,
-            retention="30 days",
-            compression="gz",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",
-            encoding="utf-8",
-        )
+            logger.add(
+                sink=str(runtime_log_file),
+                level="INFO",
+                rotation="1 MB",
+                filter=timezone_filter,
+                retention="30 days",
+                compression="gz",
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+                encoding="utf-8",
+            )
+        except (OSError, PermissionError):
+            pass
 
     return logger

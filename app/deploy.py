@@ -27,7 +27,7 @@ from playwright.async_api import ViewportSize
 from pytz import timezone
 
 from services.epic_authorization_service import EpicAuthorization, ErrorType
-from services.epic_games_service import EpicAgent, GameCollectResult
+from services.epic_games_service import EpicAgent, GameCollectResult, EPIC_RUNTIME_METRICS
 from services.epic_games_service import _is_driver_disconnect_error
 from settings import LOG_DIR, RECORD_DIR, RUNTIME_DIR
 from settings import settings
@@ -45,6 +45,37 @@ with suppress(Exception):
 
 # Default timezone for scheduling operations
 TIMEZONE = timezone("Asia/Shanghai")
+ASYNCIO_FUTURE_ERRORS = 0
+
+
+def _install_asyncio_exception_handler() -> None:
+    """保留未回收 Future 的 ERROR，同时标记为可观测事件。"""
+    loop = asyncio.get_running_loop()
+    if getattr(loop, "_epic_kiosk_exception_handler_installed", False):
+        return
+
+    def _handler(current_loop, context):
+        global ASYNCIO_FUTURE_ERRORS
+        message = str(context.get("message", ""))
+        if "Future exception was never retrieved" in message:
+            ASYNCIO_FUTURE_ERRORS += 1
+            exception = context.get("exception")
+            logger.error(
+                "unhandled_asyncio_future_total=1 "
+                f"type={type(exception).__name__ if exception else 'unknown'}"
+            )
+        current_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+    setattr(loop, "_epic_kiosk_exception_handler_installed", True)
+
+
+def _log_epic_runtime_metrics() -> None:
+    logger.info(
+        "worker_metric "
+        + " ".join(f"{key}={value}" for key, value in sorted(EPIC_RUNTIME_METRICS.items()))
+        + f" unhandled_asyncio_future_total={ASYNCIO_FUTURE_ERRORS}"
+    )
 
 
 async def execute_browser_tasks(headless: bool = True) -> ErrorType:
@@ -61,6 +92,7 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
         ErrorType: 错误类型，用于指示执行结果
     """
     logger.debug("Starting Epic Games collection task")
+    _install_asyncio_exception_handler()
 
     # ============================================================
     # 🌐 代理配置：从环境变量读取（支持 WARP 等 HTTP 代理）
@@ -130,6 +162,7 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
                 # 格式: ❌ ERROR_TYPE:xxx 其中 xxx 是 ErrorType 的 value
                 auth_error = auth_result or ErrorType.UNKNOWN
                 logger.error(f"❌ ERROR_TYPE:{auth_error.value}")
+                _log_epic_runtime_metrics()
                 return auth_error
 
             logger.debug("Authentication completed successfully")
@@ -137,6 +170,7 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
             if os.getenv("EPIC_VERIFY_ONLY", "").lower() in {"1", "true", "yes", "on"}:
                 # 托管验证只确认 Epic 登录，不应顺带领取当前周免游戏。
                 logger.success("✅ 登录成功，验证模式跳过领取")
+                _log_epic_runtime_metrics()
                 return ErrorType.SUCCESS
 
             # 登录 Agent 会注册 hCaptcha response 监听器。使用同一浏览器
@@ -172,12 +206,15 @@ async def execute_browser_tasks(headless: bool = True) -> ErrorType:
                 await browser.close()
 
             logger.debug("Browser tasks execution finished successfully")
+            _log_epic_runtime_metrics()
             return ErrorType.SUCCESS
     except Exception as exc:
         logger.exception(exc)
         if _is_driver_disconnect_error(exc):
             logger.error("❌ FINAL_ERROR:network_timeout")
+            _log_epic_runtime_metrics()
             return ErrorType.NETWORK_TIMEOUT
+        _log_epic_runtime_metrics()
         return ErrorType.UNKNOWN
 
 

@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -7,6 +8,8 @@ from services.epic_games_service import (
     EpicAgent,
     EpicGames,
     GameCollectResult,
+    PageNavigationTimeout,
+    OrderHistoryUnavailable,
     _fetch_order_items,
     _fetch_promotions_data,
 )
@@ -217,6 +220,27 @@ class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "unexpected_content_type"):
             await _fetch_order_items(page)
 
+    async def test_order_history_forbidden_is_classified_and_cached(self):
+        response = SimpleNamespace(
+            status=403,
+            headers={"content-type": "application/json"},
+            url="https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory",
+        )
+        request = SimpleNamespace(get=AsyncMock(return_value=response))
+        page = SimpleNamespace(context=SimpleNamespace(request=request))
+        agent = EpicAgent(page)
+
+        await agent._sync_order_history()
+        await agent._sync_order_history(force=True)
+        await agent.epic_games._sync_order_history(force=True)
+
+        self.assertEqual(agent._order_history.status, "forbidden")
+        self.assertEqual(request.get.await_count, 1)
+        with self.assertRaises(OrderHistoryUnavailable) as caught:
+            await _fetch_order_items(page)
+        self.assertEqual(caught.exception.status, "forbidden")
+        self.assertIn("order_history_forbidden", str(caught.exception))
+
     async def test_page_wide_owned_text_does_not_mark_product_owned(self):
         product_button = SimpleNamespace(
             is_visible=AsyncMock(return_value=True),
@@ -344,6 +368,37 @@ class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, GameCollectResult.DRIVER_CRASH)
 
+    async def test_page_navigation_timeout_maps_to_delayed_retry_type(self):
+        agent = EpicAgent(SimpleNamespace())
+        agent._promotions = [SimpleNamespace(title="Game A", url="https://example.test/game-a")]
+        agent._should_ignore_task = AsyncMock(
+            return_value=(False, GameCollectResult.SUCCESS)
+        )
+        agent.epic_games.collect_weekly_games = AsyncMock(
+            side_effect=PageNavigationTimeout("Page.goto: Timeout 45000ms exceeded")
+        )
+
+        result = await agent.collect_epic_games()
+
+        self.assertEqual(result, GameCollectResult.PAGE_TIMEOUT)
+
+    async def test_claim_page_navigation_timeout_maps_to_delayed_retry_type(self):
+        agent = EpicAgent(SimpleNamespace())
+        agent._should_ignore_task = AsyncMock(
+            side_effect=PageNavigationTimeout("Page.goto: Timeout 30000ms exceeded")
+        )
+
+        result = await agent.collect_epic_games()
+
+        self.assertEqual(result, GameCollectResult.PAGE_TIMEOUT)
+
+    async def test_click_implementation_has_no_delayed_browser_timers(self):
+        source = Path(__file__).resolve().parents[1].joinpath(
+            "app", "services", "epic_games_service.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("setTimeout(() => button.click()", source)
+        self.assertNotIn("setInterval(() =>", source)
+
     async def test_product_cta_click_falls_back_to_force_click(self):
         button = SimpleNamespace(
             click=AsyncMock(side_effect=[RuntimeError("normal click timeout"), None]),
@@ -355,16 +410,16 @@ class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(button.click.await_count, 2)
         button.evaluate.assert_not_awaited()
 
-    async def test_product_page_cta_uses_keyboard_when_mouse_click_times_out(self):
+    async def test_product_page_cta_uses_one_synchronous_fallback_when_mouse_click_times_out(self):
         button = SimpleNamespace(
             wait_for=AsyncMock(),
+            text_content=AsyncMock(return_value="Get"),
             click=AsyncMock(side_effect=RuntimeError("mouse click timeout")),
-            evaluate=AsyncMock(side_effect=[RuntimeError("native click timeout"), None]),
+            evaluate=AsyncMock(return_value={"clicked": True, "text": "Get"}),
         )
-        keyboard = SimpleNamespace(press=AsyncMock())
         page = SimpleNamespace(
             locator=lambda _selector: SimpleNamespace(first=button),
-            keyboard=keyboard,
+            evaluate=button.evaluate,
             wait_for_timeout=AsyncMock(),
         )
 
@@ -375,8 +430,7 @@ class CheckoutResultTests(unittest.IsolatedAsyncioTestCase):
         ):
             await EpicGames._click_product_page_cta(page)
 
-        self.assertEqual(button.evaluate.await_count, 2)
-        keyboard.press.assert_awaited_once_with("Enter")
+        self.assertEqual(button.evaluate.await_count, 1)
         self.assertEqual(button.click.await_count, 1)
 
 

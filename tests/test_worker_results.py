@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -53,6 +54,78 @@ class WorkerResultTests(unittest.TestCase):
 
         restart.assert_not_called()
         self.assertEqual(task["retry_data"]["warp_index"], 4)
+
+    def test_page_timeout_is_one_delayed_retry_without_warp_restart(self):
+        task = {
+            "run_id": "46f83017-9d38-4b02-a0bc-fd79864e0675",
+            "email": "private@example.com",
+            "retry_data": {},
+        }
+        fake_redis = MagicMock()
+        with (
+            patch.object(worker, "r", fake_redis),
+            patch.object(worker, "set_task_feedback"),
+            patch.object(worker, "restart_warp_for_retry") as restart,
+            patch.object(worker.time, "time", return_value=1000),
+            patch.object(worker, "PAGE_TIMEOUT_RETRY_DELAY_SECONDS", 600),
+        ):
+            self.assertTrue(worker.schedule_failure_retry(task, "page_timeout", 4))
+
+        restart.assert_not_called()
+        self.assertEqual(task["retry_data"]["warp_index"], 4)
+        self.assertEqual(fake_redis.zadd.call_args.args[0], worker.RETRY_QUEUE)
+        retry_count = task["retry_data"]["page_timeout"]
+        self.assertEqual(retry_count, 1)
+
+    def test_captcha_invalid_and_login_page_timeout_use_short_retry_delays(self):
+        """这两类失败必须短延迟排期。
+
+        retry_delay 期间 retry_pending 存在，主循环 finally 就不删 task_lock，
+        用户会看到「该账号有任务正在执行中」而无法重新提交。现有 captcha 类是
+        7200s（锁 2 小时），对这两类可自愈失败绝不能照抄。
+        """
+        for error_type, expected_delay in (
+            ("captcha_invalid", 120),
+            ("login_page_timeout", 180),
+        ):
+            with self.subTest(error_type=error_type):
+                task = {
+                    "run_id": "46f83017-9d38-4b02-a0bc-fd79864e0675",
+                    "email": "private@example.com",
+                    "retry_data": {},
+                }
+                fake_redis = MagicMock()
+                with (
+                    patch.object(worker, "r", fake_redis),
+                    patch.object(worker, "set_task_feedback"),
+                    patch.object(worker, "restart_warp_for_retry") as restart,
+                    patch.object(worker.time, "time", return_value=1000),
+                ):
+                    self.assertTrue(
+                        worker.schedule_failure_retry(task, error_type, 4)
+                    )
+
+                restart.assert_not_called()
+                self.assertEqual(task["retry_data"][error_type], 1)
+                self.assertEqual(fake_redis.zadd.call_args.args[0], worker.RETRY_QUEUE)
+                # run_at 必须落在 now + 预期短延迟，且远小于 captcha 类的 7200s
+                run_at = list(fake_redis.zadd.call_args.args[1].values())[0]
+                self.assertEqual(run_at, 1000 + expected_delay)
+                self.assertLess(expected_delay, 600)
+
+    def test_new_retryable_error_types_are_wired_into_dispatch_set(self):
+        """policies 有条目还不够 —— 调度点的集合里也必须有，否则永不重试。
+
+        线上真实踩过：policies 加了 captcha_invalid，但 run_task 的调度集合是
+        硬编码的，schedule_failure_retry 从未被调用，retry_queue 始终为 0。
+        """
+        source = Path(worker.__file__).read_text(encoding="utf-8")
+        dispatch_block = source.split('if final_error_type in {\n            "provider_timeout",')[1]
+        dispatch_block = dispatch_block.split("}", 1)[0]
+        for error_type in ("captcha_invalid", "login_page_timeout"):
+            with self.subTest(error_type=error_type):
+                self.assertIn(error_type, dispatch_block)
+                self.assertIn(error_type, worker.ERROR_TYPE_MESSAGES)
 
     def test_log_redaction_removes_credentials_and_tokens(self):
         email = "user@example.com"
